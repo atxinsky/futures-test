@@ -274,22 +274,30 @@ def download_from_akshare(symbol: str, start_date: str = None, end_date: str = N
     try:
         import akshare as ak
 
-        # 获取主力连续数据
-        df = ak.futures_main_sina(symbol=symbol.lower())
+        # 使用 futures_zh_daily_sina 接口，符号格式为 AU0 (主力连续)
+        sina_symbol = f"{symbol.upper()}0"
+        df = ak.futures_zh_daily_sina(symbol=sina_symbol)
 
         if df is None or len(df) == 0:
             return None
 
-        # 标准化列名
+        # 标准化列名 (futures_zh_daily_sina 返回的列名)
         df = df.rename(columns={
-            '日期': 'time',
-            '开盘价': 'open',
-            '最高价': 'high',
-            '最低价': 'low',
-            '收盘价': 'close',
-            '成交量': 'volume',
-            '持仓量': 'open_interest'
+            'date': 'time',
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'volume': 'volume',
+            'hold': 'open_interest'
         })
+
+        # 确保必要的列存在
+        required_cols = ['time', 'open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in df.columns:
+                print(f"缺少列: {col}")
+                return None
 
         df['time'] = pd.to_datetime(df['time'])
         df = df.sort_values('time').reset_index(drop=True)
