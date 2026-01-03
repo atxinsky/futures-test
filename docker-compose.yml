@@ -1,0 +1,26 @@
+name: futures-backtest
+
+services:
+  futures-backtest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: futures-backtest
+    ports:
+      - "8502:8502"
+    volumes:
+      # 数据持久化
+      - ./data:/app/data
+      # 策略文件 (可选，方便开发时修改)
+      - ./strategies:/app/strategies
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  futures-data:

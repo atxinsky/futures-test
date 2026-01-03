@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+*.md
+*.bat
+.env
+data/*.db
+data/*.csv
+*.log
+.streamlit/secrets.toml
