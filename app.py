@@ -1,8 +1,7 @@
 # coding=utf-8
 """
 期货策略回测系统
-参考banbot设计的专业回测可视化界面
-支持多策略选择和动态参数配置
+支持数据下载、多策略选择、时间周期选择和动态参数配置
 """
 
 import streamlit as st
@@ -19,6 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import INSTRUMENTS, get_instrument, EXCHANGES
 from engine import run_backtest, run_backtest_with_strategy, calculate_indicators
+from data_manager import (
+    get_data_status, download_symbol, download_batch, load_from_database,
+    get_symbol_list_by_category, FUTURES_SYMBOLS, export_to_csv
+)
 from strategies import (
     get_all_strategies, get_strategy, list_strategies,
     load_strategy_from_file, BaseStrategy, StrategyParam
@@ -55,18 +58,46 @@ st.markdown("""
         border-radius: 5px;
         margin: 10px 0;
     }
+    .download-btn {
+        background-color: #4CAF50;
+        color: white;
+        padding: 10px 20px;
+        border-radius: 5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
+def resample_data(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    """重采样数据到不同周期"""
+    if period == "日线":
+        return df
+
+    df = df.copy()
+    df = df.set_index('time')
+
+    if period == "周线":
+        rule = 'W'
+    elif period == "月线":
+        rule = 'ME'
+    else:
+        return df.reset_index()
+
+    resampled = df.resample(rule).agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum' if 'volume' in df.columns else 'first'
+    }).dropna()
+
+    return resampled.reset_index()
+
+
 @st.cache_data
-def load_data(file_path: str) -> pd.DataFrame:
-    """加载数据文件"""
-    df = pd.read_csv(file_path)
-    # 尝试自动识别列名
-    if len(df.columns) >= 5:
-        df.columns = ['time', 'open', 'high', 'low', 'close'] + list(df.columns[5:])
-    df['time'] = pd.to_datetime(df['time'])
+def load_data_from_db(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """从数据库加载数据"""
+    df = load_from_database(symbol, start_date, end_date)
     return df
 
 
@@ -84,11 +115,11 @@ def render_strategy_params(strategy_class) -> dict:
     }
 
     for p in param_defs:
-        if any(k in p.name for k in ['len', 'period', 'ma', 'ema', 'sma', 'fast', 'slow', 'bb']):
+        if any(k in p.name for k in ['len', 'period', 'ma', 'ema', 'sma', 'fast', 'slow', 'bb', 'macd']):
             grouped_params['均线/周期参数'].append(p)
-        elif any(k in p.name for k in ['stop', 'atr', 'risk', 'adx']):
+        elif any(k in p.name for k in ['stop', 'atr', 'risk', 'adx', 'drawdown', 'trigger', 'break']):
             grouped_params['风控参数'].append(p)
-        elif any(k in p.name for k in ['capital', 'risk_rate', 'position']):
+        elif any(k in p.name for k in ['capital', 'risk_rate', 'position', 'partial']):
             grouped_params['仓位参数'].append(p)
         else:
             grouped_params['其他参数'].append(p)
@@ -98,7 +129,7 @@ def render_strategy_params(strategy_class) -> dict:
         if not group_params:
             continue
 
-        with st.sidebar.expander(group_name, expanded=True):
+        with st.expander(group_name, expanded=True):
             for p in group_params:
                 if p.param_type == 'int':
                     params[p.name] = st.slider(
@@ -115,7 +146,7 @@ def render_strategy_params(strategy_class) -> dict:
                         float(p.min_val) if p.min_val else 0.0,
                         float(p.max_val) if p.max_val else 1.0,
                         float(p.default),
-                        float(p.step) if p.step else 0.1,
+                        float(p.step) if p.step else 0.01,
                         help=p.description
                     )
                 elif p.param_type == 'bool':
@@ -135,129 +166,293 @@ def render_strategy_params(strategy_class) -> dict:
     return params
 
 
-def render_sidebar():
-    """渲染侧边栏配置"""
-    st.sidebar.title("⚙️ 回测配置")
+def render_data_management():
+    """渲染数据管理页面"""
+    st.header("📥 数据管理")
 
-    # ========== 策略选择 ==========
-    st.sidebar.subheader("🎯 策略选择")
+    tab1, tab2 = st.tabs(["下载数据", "数据状态"])
 
-    strategies = get_all_strategies()
-    strategy_names = list(strategies.keys())
-    strategy_display = {k: v.display_name for k, v in strategies.items()}
+    with tab1:
+        st.subheader("下载期货数据")
 
-    selected_strategy_name = st.sidebar.selectbox(
-        "选择策略",
-        options=strategy_names,
-        format_func=lambda x: f"{strategy_display[x]} ({x})"
-    )
+        # 按类别选择品种
+        categories = get_symbol_list_by_category()
 
-    strategy_class = strategies[selected_strategy_name]
+        col1, col2 = st.columns(2)
 
-    # 显示策略信息
-    with st.sidebar.expander("📖 策略说明", expanded=False):
-        st.markdown(f"**{strategy_class.display_name}**")
-        st.markdown(f"*版本: {strategy_class.version} | 作者: {strategy_class.author}*")
-        st.markdown(strategy_class.description)
+        with col1:
+            category = st.selectbox(
+                "选择类别",
+                options=list(categories.keys())
+            )
 
-    # 导入外部策略
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("📥 导入外部策略", expanded=False):
-        uploaded_file = st.file_uploader(
-            "上传策略文件 (.py)",
-            type=['py'],
-            help="上传继承自BaseStrategy的策略Python文件"
-        )
-        if uploaded_file is not None:
-            # 保存到临时目录
-            temp_path = os.path.join(os.path.dirname(__file__), 'strategies', f'_temp_{uploaded_file.name}')
-            try:
-                with open(temp_path, 'wb') as f:
-                    f.write(uploaded_file.getvalue())
-                # 加载策略
-                new_strategy = load_strategy_from_file(temp_path)
-                st.success(f"✅ 成功导入策略: {new_strategy.display_name}")
-                # 刷新页面以显示新策略
-                st.rerun()
-            except Exception as e:
-                st.error(f"导入失败: {e}")
-            finally:
-                # 清理临时文件
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+            symbols_in_cat = categories[category]
+            selected_symbols = st.multiselect(
+                "选择品种",
+                options=[s[0] for s in symbols_in_cat],
+                format_func=lambda x: f"{x} - {FUTURES_SYMBOLS[x][0]}",
+                default=[s[0] for s in symbols_in_cat[:2]] if symbols_in_cat else []
+            )
 
-        strategy_file_path = st.text_input(
-            "或输入策略文件路径",
-            placeholder="D:/my_strategies/my_strategy.py"
-        )
-        if st.button("加载策略") and strategy_file_path:
-            try:
-                new_strategy = load_strategy_from_file(strategy_file_path)
-                st.success(f"✅ 成功导入策略: {new_strategy.display_name}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"加载失败: {e}")
+        with col2:
+            # 快捷选择
+            st.write("**快捷选择:**")
+            if st.button("全选当前类别"):
+                selected_symbols = [s[0] for s in symbols_in_cat]
 
-    st.sidebar.markdown("---")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("股指期货"):
+                    selected_symbols = ["IF", "IH", "IC", "IM"]
+            with col_b:
+                if st.button("主要商品"):
+                    selected_symbols = ["RB", "AU", "CU", "M", "TA"]
 
-    # ========== 品种选择 ==========
-    st.sidebar.subheader("📌 品种设置")
+        st.markdown("---")
 
-    symbol = st.sidebar.selectbox(
-        "选择品种",
-        options=list(INSTRUMENTS.keys()),
-        format_func=lambda x: f"{x} - {INSTRUMENTS[x]['name']}"
-    )
+        # 下载按钮
+        if selected_symbols:
+            st.write(f"已选择 **{len(selected_symbols)}** 个品种: {', '.join(selected_symbols)}")
 
-    inst = get_instrument(symbol)
+            if st.button("🚀 开始下载", type="primary", use_container_width=True):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                results_container = st.container()
 
-    # 显示品种信息
-    with st.sidebar.expander("品种详情", expanded=False):
-        st.write(f"**交易所**: {inst['exchange']}")
-        st.write(f"**合约乘数**: {inst['multiplier']} 元/点")
-        st.write(f"**最小变动**: {inst['price_tick']}")
-        st.write(f"**保证金率**: {inst['margin_rate']*100:.1f}%")
-        if inst['commission_fixed'] > 0:
-            st.write(f"**手续费**: {inst['commission_fixed']} 元/手")
+                results = {}
+                for i, symbol in enumerate(selected_symbols):
+                    status_text.text(f"正在下载 {symbol} ({i+1}/{len(selected_symbols)})...")
+                    progress_bar.progress((i + 1) / len(selected_symbols))
+
+                    success, msg, count = download_symbol(symbol)
+                    results[symbol] = (success, msg, count)
+
+                status_text.text("下载完成!")
+
+                # 显示结果
+                with results_container:
+                    success_count = sum(1 for r in results.values() if r[0])
+                    st.success(f"成功下载 {success_count}/{len(results)} 个品种")
+
+                    for symbol, (success, msg, count) in results.items():
+                        if success:
+                            st.write(f"✅ {msg} - {count}条数据")
+                        else:
+                            st.write(f"❌ {msg}")
         else:
-            st.write(f"**手续费率**: {inst['commission_rate']*10000:.2f}‱")
-        st.write(f"**夜盘**: {'是' if inst['night_trade'] else '否'}")
+            st.info("请选择要下载的品种")
 
-    # ========== 数据文件 ==========
-    st.sidebar.subheader("📁 数据文件")
-    data_dir = st.sidebar.text_input("数据目录", value="D:/期货/股指期货")
+    with tab2:
+        st.subheader("数据状态")
 
-    # 扫描目录中的CSV文件
-    csv_files = []
-    if os.path.exists(data_dir):
-        csv_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+        if st.button("🔄 刷新数据状态"):
+            st.cache_data.clear()
 
-    if csv_files:
-        data_file = st.sidebar.selectbox("选择数据文件", options=csv_files)
-        file_path = os.path.join(data_dir, data_file)
-    else:
-        file_path = st.sidebar.text_input("数据文件路径")
+        df_status = get_data_status()
 
-    # ========== 策略参数 ==========
-    st.sidebar.subheader("🔧 策略参数")
-    params = render_strategy_params(strategy_class)
+        # 筛选有数据的品种
+        df_with_data = df_status[df_status['record_count'] > 0].copy()
+        df_no_data = df_status[df_status['record_count'] == 0].copy()
 
-    # ========== 资金设置 ==========
-    st.sidebar.subheader("💰 资金设置")
-    initial_capital = st.sidebar.number_input(
-        "初始资金 (元)",
-        min_value=100000,
-        max_value=100000000,
-        value=1000000,
-        step=100000
-    )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("已有数据品种", len(df_with_data))
+        with col2:
+            st.metric("无数据品种", len(df_no_data))
 
-    return symbol, file_path, params, initial_capital, strategy_class
+        if len(df_with_data) > 0:
+            st.write("**已下载数据:**")
+            df_display = df_with_data[['symbol', 'name', 'exchange', 'start_date', 'end_date', 'record_count']].copy()
+            df_display.columns = ['代码', '名称', '交易所', '起始日期', '结束日期', '数据条数']
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+
+def render_backtest_page():
+    """渲染回测页面"""
+    st.header("📊 策略回测")
+
+    # 左右布局
+    col_config, col_result = st.columns([1, 2])
+
+    with col_config:
+        st.subheader("⚙️ 回测配置")
+
+        # ========== 策略选择 ==========
+        strategies = get_all_strategies()
+        strategy_names = list(strategies.keys())
+        strategy_display = {k: v.display_name for k, v in strategies.items()}
+
+        selected_strategy_name = st.selectbox(
+            "🎯 选择策略",
+            options=strategy_names,
+            format_func=lambda x: f"{strategy_display[x]} ({x})"
+        )
+
+        strategy_class = strategies[selected_strategy_name]
+
+        # 显示策略信息
+        with st.expander("📖 策略说明", expanded=False):
+            st.markdown(f"**{strategy_class.display_name}**")
+            st.markdown(f"*版本: {strategy_class.version}*")
+            st.markdown(strategy_class.description)
+
+        st.markdown("---")
+
+        # ========== 品种选择 ==========
+        st.write("**📌 品种选择**")
+
+        # 从数据库获取有数据的品种
+        df_status = get_data_status()
+        symbols_with_data = df_status[df_status['record_count'] > 0]['symbol'].tolist()
+
+        if not symbols_with_data:
+            st.warning("没有数据，请先在「数据管理」页面下载数据")
+            return None
+
+        symbol = st.selectbox(
+            "选择品种",
+            options=symbols_with_data,
+            format_func=lambda x: f"{x} - {FUTURES_SYMBOLS.get(x, ('未知',))[0]}"
+        )
+
+        # 获取该品种的数据范围
+        symbol_info = df_status[df_status['symbol'] == symbol].iloc[0]
+        data_start = symbol_info['start_date']
+        data_end = symbol_info['end_date']
+
+        st.caption(f"数据范围: {data_start} ~ {data_end}")
+
+        st.markdown("---")
+
+        # ========== 时间周期 ==========
+        st.write("**⏱️ 时间周期**")
+        time_period = st.selectbox(
+            "K线周期",
+            options=["日线", "周线", "月线"],
+            index=0
+        )
+
+        st.markdown("---")
+
+        # ========== 回测时间范围 ==========
+        st.write("**📅 回测时间范围**")
+
+        col_start, col_end = st.columns(2)
+
+        # 解析数据范围日期
+        try:
+            min_date = datetime.strptime(data_start, '%Y-%m-%d').date()
+            max_date = datetime.strptime(data_end, '%Y-%m-%d').date()
+        except:
+            min_date = datetime(2010, 1, 1).date()
+            max_date = datetime.now().date()
+
+        with col_start:
+            start_date = st.date_input(
+                "起始日期",
+                value=min_date,
+                min_value=min_date,
+                max_value=max_date
+            )
+
+        with col_end:
+            end_date = st.date_input(
+                "结束日期",
+                value=max_date,
+                min_value=min_date,
+                max_value=max_date
+            )
+
+        st.markdown("---")
+
+        # ========== 资金设置 ==========
+        st.write("**💰 资金设置**")
+        initial_capital = st.number_input(
+            "初始资金 (元)",
+            min_value=100000,
+            max_value=100000000,
+            value=1000000,
+            step=100000
+        )
+
+        st.markdown("---")
+
+        # ========== 策略参数 ==========
+        st.write("**🔧 策略参数**")
+        params = render_strategy_params(strategy_class)
+
+        st.markdown("---")
+
+        # ========== 开始回测按钮 ==========
+        run_backtest_btn = st.button(
+            "🚀 开始回测",
+            type="primary",
+            use_container_width=True
+        )
+
+        return {
+            'symbol': symbol,
+            'strategy_class': strategy_class,
+            'params': params,
+            'initial_capital': initial_capital,
+            'start_date': start_date.strftime('%Y-%m-%d'),
+            'end_date': end_date.strftime('%Y-%m-%d'),
+            'time_period': time_period,
+            'run_backtest': run_backtest_btn
+        }
+
+    return None
+
+
+def run_backtest_and_display(config, result_container):
+    """运行回测并显示结果"""
+    with result_container:
+        with st.spinner(f"正在使用 {config['strategy_class'].display_name} 策略回测..."):
+            try:
+                # 加载数据
+                df_data = load_from_database(
+                    config['symbol'],
+                    config['start_date'],
+                    config['end_date']
+                )
+
+                if len(df_data) == 0:
+                    st.error("没有数据，请先下载数据")
+                    return
+
+                # 重采样到指定周期
+                df_data = resample_data(df_data, config['time_period'])
+
+                st.info(f"数据: {len(df_data)} 条 ({config['start_date']} ~ {config['end_date']}) - {config['time_period']}")
+
+                # 创建策略实例
+                strategy_instance = config['strategy_class'](config['params'])
+
+                # 运行回测
+                result = run_backtest_with_strategy(
+                    df_data,
+                    config['symbol'],
+                    strategy_instance,
+                    config['initial_capital']
+                )
+
+                # 保存结果到session
+                st.session_state['result'] = result
+                st.session_state['df_data'] = df_data
+                st.session_state['params'] = config['params']
+                st.session_state['strategy_class'] = config['strategy_class']
+
+                st.success(f"✅ 回测完成! 共 {len(result.trades)} 笔交易")
+
+            except Exception as e:
+                st.error(f"回测失败: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
 
 def render_overview(result):
     """渲染概览页"""
-    st.header("📊 回测概览")
+    st.subheader("📊 回测概览")
 
     # 顶部指标卡片
     col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -302,36 +497,35 @@ def render_overview(result):
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.subheader("💰 收益指标")
-        st.write(f"**初始资金**: ¥{result.initial_capital:,.0f}")
-        st.write(f"**期末资金**: ¥{result.final_capital:,.0f}")
-        st.write(f"**总盈亏**: ¥{result.total_pnl:,.0f}")
-        st.write(f"**总收益率**: {result.total_return_pct:.2f}%")
-        st.write(f"**年化收益**: {result.annual_return_pct:.2f}%")
-        st.write(f"**总手续费**: ¥{result.total_commission:,.0f}")
+        st.write("**💰 收益指标**")
+        st.write(f"初始资金: ¥{result.initial_capital:,.0f}")
+        st.write(f"期末资金: ¥{result.final_capital:,.0f}")
+        st.write(f"总盈亏: ¥{result.total_pnl:,.0f}")
+        st.write(f"总收益率: {result.total_return_pct:.2f}%")
+        st.write(f"年化收益: {result.annual_return_pct:.2f}%")
+        st.write(f"总手续费: ¥{result.total_commission:,.0f}")
 
     with col2:
-        st.subheader("📉 风险指标")
-        st.write(f"**最大回撤**: {result.max_drawdown_pct:.2f}%")
-        st.write(f"**回撤金额**: ¥{result.max_drawdown_val:,.0f}")
-        st.write(f"**夏普比率**: {result.sharpe_ratio:.2f}")
-        st.write(f"**索提诺比率**: {result.sortino_ratio:.2f}")
-        st.write(f"**卡尔玛比率**: {result.calmar_ratio:.2f}")
-        st.write(f"**收益/回撤**: {result.total_return_pct / result.max_drawdown_pct:.2f}" if result.max_drawdown_pct > 0 else "**收益/回撤**: N/A")
+        st.write("**📉 风险指标**")
+        st.write(f"最大回撤: {result.max_drawdown_pct:.2f}%")
+        st.write(f"回撤金额: ¥{result.max_drawdown_val:,.0f}")
+        st.write(f"夏普比率: {result.sharpe_ratio:.2f}")
+        st.write(f"索提诺比率: {result.sortino_ratio:.2f}")
+        st.write(f"卡尔玛比率: {result.calmar_ratio:.2f}")
 
     with col3:
-        st.subheader("📈 交易指标")
-        st.write(f"**总交易数**: {len(result.trades)}")
-        st.write(f"**胜率**: {result.win_rate:.1f}%")
-        st.write(f"**盈亏比**: {result.profit_factor:.2f}")
-        st.write(f"**平均盈利**: ¥{result.avg_win:,.0f}")
-        st.write(f"**平均亏损**: ¥{result.avg_loss:,.0f}")
-        st.write(f"**平均持仓**: {result.avg_holding_days:.1f}天")
+        st.write("**📈 交易指标**")
+        st.write(f"总交易数: {len(result.trades)}")
+        st.write(f"胜率: {result.win_rate:.1f}%")
+        st.write(f"盈亏比: {result.profit_factor:.2f}")
+        st.write(f"平均盈利: ¥{result.avg_win:,.0f}")
+        st.write(f"平均亏损: ¥{result.avg_loss:,.0f}")
+        st.write(f"平均持仓: {result.avg_holding_days:.1f}天")
 
 
 def render_equity_chart(result):
     """渲染资金曲线"""
-    st.header("💹 资金曲线")
+    st.subheader("💹 资金曲线")
 
     df = result.equity_curve
 
@@ -413,7 +607,7 @@ def render_equity_chart(result):
 
 def render_trades_table(result):
     """渲染交易列表"""
-    st.header("📋 交易记录")
+    st.subheader("📋 交易记录")
 
     if not result.trades:
         st.warning("没有交易记录")
@@ -431,10 +625,8 @@ def render_trades_table(result):
             '出场价': f"{t.exit_price:.2f}" if t.exit_price else '',
             '手数': t.volume,
             '持仓(天)': t.holding_days,
-            '盈亏点': f"{(t.exit_price - t.entry_price) * t.direction:.1f}" if t.exit_price else '',
             '盈亏%': f"{t.pnl_pct:+.2f}%",
             '盈亏额': f"¥{t.pnl:+,.0f}",
-            '手续费': f"¥{t.commission:.0f}",
             '出场原因': t.exit_tag,
             '结果': '盈' if t.pnl > 0 else '亏'
         })
@@ -442,7 +634,7 @@ def render_trades_table(result):
     df_trades = pd.DataFrame(trades_data)
 
     # 筛选器
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         result_filter = st.multiselect(
             "筛选结果",
@@ -456,22 +648,12 @@ def render_trades_table(result):
             options=exit_tags,
             default=exit_tags
         )
-    with col3:
-        sort_by = st.selectbox(
-            "排序",
-            options=['编号', '盈亏额', '持仓(天)', '入场时间']
-        )
 
     # 应用筛选
     df_filtered = df_trades[
         (df_trades['结果'].isin(result_filter)) &
         (df_trades['出场原因'].isin(tag_filter))
     ]
-
-    # 排序
-    if sort_by == '盈亏额':
-        df_filtered['_sort'] = df_filtered['盈亏额'].str.replace('[¥,]', '', regex=True).astype(float)
-        df_filtered = df_filtered.sort_values('_sort', ascending=False).drop('_sort', axis=1)
 
     st.dataframe(df_filtered, use_container_width=True, hide_index=True)
 
@@ -485,352 +667,105 @@ def render_trades_table(result):
     )
 
 
-def render_kline_analysis(result, df_data, params, strategy_class):
-    """渲染K线分析"""
-    st.header("📈 K线分析")
+def render_statistics(result):
+    """渲染统计分析"""
+    st.subheader("📊 统计分析")
 
     if not result.trades:
         st.warning("没有交易记录")
         return
 
-    # 交易选择器
-    trade_options = []
-    for t in result.trades:
-        status = "盈" if t.pnl > 0 else "亏"
-        trade_options.append(
-            f"[{status}] #{t.trade_id+1} | {t.entry_time.strftime('%Y-%m-%d')} → "
-            f"{t.exit_time.strftime('%Y-%m-%d')} | 盈亏: ¥{t.pnl:+,.0f}"
-        )
-
-    selected_idx = st.selectbox(
-        "选择交易",
-        range(len(trade_options)),
-        format_func=lambda x: trade_options[x]
-    )
-
-    trade = result.trades[selected_idx]
-
-    # K线图
-    start_date = trade.entry_time - timedelta(days=60)
-    end_date = trade.exit_time + timedelta(days=30)
-
-    mask = (df_data['time'] >= start_date) & (df_data['time'] <= end_date)
-    df_plot = df_data[mask].copy()
-
-    # 使用策略计算指标
-    strategy_instance = strategy_class(params)
-    df_plot = strategy_instance.calculate_indicators(df_plot)
-
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.75, 0.25],
-        subplot_titles=('K线图', '成交量')
-    )
-
-    # K线
-    fig.add_trace(
-        go.Candlestick(
-            x=df_plot['time'],
-            open=df_plot['open'],
-            high=df_plot['high'],
-            low=df_plot['low'],
-            close=df_plot['close'],
-            name='K线',
-            increasing_line_color='#F44336',
-            decreasing_line_color='#4CAF50'
-        ),
-        row=1, col=1
-    )
-
-    # 尝试添加均线指标
-    indicator_cols = ['ema_short', 'ema_long', 'ma_fast', 'ma_slow', 'bb_upper', 'bb_middle', 'bb_lower',
-                      'high_line', 'entry_high', 'exit_low']
-    colors = ['orange', 'blue', 'orange', 'blue', 'gray', 'purple', 'gray', 'purple', 'green', 'red']
-
-    for col, color in zip(indicator_cols, colors):
-        if col in df_plot.columns:
-            fig.add_trace(
-                go.Scatter(x=df_plot['time'], y=df_plot[col],
-                           name=col, line=dict(color=color, width=1)),
-                row=1, col=1
-            )
-
-    # 买入标记
-    fig.add_trace(
-        go.Scatter(
-            x=[trade.entry_time],
-            y=[trade.entry_price],
-            mode='markers+text',
-            marker=dict(symbol='triangle-up', size=20, color='#2196F3'),
-            text=[f"买入 {trade.entry_price:.1f}"],
-            textposition='bottom center',
-            textfont=dict(size=12, color='#2196F3'),
-            showlegend=False
-        ),
-        row=1, col=1
-    )
-
-    # 卖出标记
-    exit_color = '#4CAF50' if trade.pnl > 0 else '#F44336'
-    fig.add_trace(
-        go.Scatter(
-            x=[trade.exit_time],
-            y=[trade.exit_price],
-            mode='markers+text',
-            marker=dict(symbol='triangle-down', size=20, color=exit_color),
-            text=[f"卖出 {trade.exit_price:.1f}"],
-            textposition='top center',
-            textfont=dict(size=12, color=exit_color),
-            showlegend=False
-        ),
-        row=1, col=1
-    )
-
-    # 连接线
-    fig.add_trace(
-        go.Scatter(
-            x=[trade.entry_time, trade.exit_time],
-            y=[trade.entry_price, trade.exit_price],
-            mode='lines',
-            line=dict(color=exit_color, width=2, dash='dash'),
-            showlegend=False
-        ),
-        row=1, col=1
-    )
-
-    # 成交量
-    if 'volume' in df_plot.columns:
-        colors = ['#F44336' if c >= o else '#4CAF50' for c, o in zip(df_plot['close'], df_plot['open'])]
-        fig.add_trace(
-            go.Bar(x=df_plot['time'], y=df_plot['volume'], name='成交量', marker_color=colors),
-            row=2, col=1
-        )
-
-    fig.update_layout(
-        height=700,
-        xaxis_rangeslider_visible=False,
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02)
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 交易详情
     col1, col2 = st.columns(2)
+
     with col1:
-        st.subheader("入场信息")
-        st.write(f"**时间**: {trade.entry_time.strftime('%Y-%m-%d')}")
-        st.write(f"**价格**: {trade.entry_price:.2f}")
-        st.write(f"**手数**: {trade.volume}")
-        st.write(f"**信号**: {trade.entry_tag}")
-
-    with col2:
-        st.subheader("出场信息")
-        st.write(f"**时间**: {trade.exit_time.strftime('%Y-%m-%d')}")
-        st.write(f"**价格**: {trade.exit_price:.2f}")
-        st.write(f"**持仓**: {trade.holding_days}天")
-        st.write(f"**原因**: {trade.exit_tag}")
-
-    # 盈亏
-    st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        pnl_points = (trade.exit_price - trade.entry_price) * trade.direction
-        st.metric("盈亏点数", f"{pnl_points:+.1f}")
-    with col2:
-        st.metric("盈亏比例", f"{trade.pnl_pct:+.2f}%")
-    with col3:
-        st.metric("盈亏金额", f"¥{trade.pnl:+,.0f}")
-    with col4:
-        st.metric("手续费", f"¥{trade.commission:.0f}")
-
-
-def render_statistics(result):
-    """渲染统计分析"""
-    st.header("📊 统计分析")
-
-    tab1, tab2, tab3 = st.tabs(["按时间", "按出场原因", "收益分布"])
-
-    with tab1:
-        if result.yearly_stats is not None:
-            st.subheader("年度统计")
-            st.dataframe(result.yearly_stats.round(2), use_container_width=True)
-
-        if result.monthly_stats is not None:
-            st.subheader("月度统计")
-            # 月度收益热力图
-            df_monthly = result.monthly_stats.reset_index()
-            df_monthly['year'] = df_monthly['exit_month'].dt.year
-            df_monthly['month'] = df_monthly['exit_month'].dt.month
-
-            pivot = df_monthly.pivot(index='year', columns='month', values='pnl')
-
-            fig = go.Figure(data=go.Heatmap(
-                z=pivot.values,
-                x=[f'{m}月' for m in pivot.columns],
-                y=pivot.index,
-                colorscale='RdYlGn',
-                text=[[f'¥{v:,.0f}' if not pd.isna(v) else '' for v in row] for row in pivot.values],
-                texttemplate='%{text}',
-                hovertemplate='%{y}年%{x}: %{text}<extra></extra>'
-            ))
-            fig.update_layout(title='月度收益热力图', height=400)
-            st.plotly_chart(fig, use_container_width=True)
-
-    with tab2:
+        # 出场原因统计
         if result.exit_tag_stats is not None:
-            st.subheader("出场原因统计")
+            st.write("**出场原因统计**")
             df_exit = result.exit_tag_stats.reset_index()
             df_exit.columns = ['出场原因', '次数', '总盈亏', '平均盈亏', '平均收益%']
             st.dataframe(df_exit, use_container_width=True, hide_index=True)
 
-            # 饼图
-            fig = go.Figure(data=[go.Pie(
-                labels=df_exit['出场原因'],
-                values=df_exit['次数'],
-                hole=0.4
-            )])
-            fig.update_layout(title='出场原因分布')
-            st.plotly_chart(fig, use_container_width=True)
+    with col2:
+        # 收益分布
+        st.write("**收益分布**")
+        pnl_list = [t.pnl for t in result.trades]
 
-    with tab3:
-        if result.trades:
-            st.subheader("收益分布")
-            pnl_list = [t.pnl for t in result.trades]
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=pnl_list,
+            nbinsx=20,
+            marker_color='#2196F3'
+        ))
+        fig.add_vline(x=0, line_dash="dash", line_color="red")
+        fig.update_layout(
+            height=300,
+            xaxis_title='盈亏金额 (元)',
+            yaxis_title='次数',
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-            fig = go.Figure()
-            fig.add_trace(go.Histogram(
-                x=pnl_list,
-                nbinsx=20,
-                marker_color='#2196F3'
-            ))
-            fig.add_vline(x=0, line_dash="dash", line_color="red")
-            fig.update_layout(
-                title='单笔交易盈亏分布',
-                xaxis_title='盈亏金额 (元)',
-                yaxis_title='次数'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    # 盈亏对比
+    st.markdown("---")
+    wins = [t.pnl for t in result.trades if t.pnl > 0]
+    losses = [t.pnl for t in result.trades if t.pnl <= 0]
 
-            # 盈亏对比
-            wins = [t.pnl for t in result.trades if t.pnl > 0]
-            losses = [t.pnl for t in result.trades if t.pnl <= 0]
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("盈利交易", f"{len(wins)}笔", f"总计 ¥{sum(wins):,.0f}")
-                st.metric("最大单笔盈利", f"¥{max(wins):,.0f}" if wins else "¥0")
-                st.metric("平均盈利", f"¥{np.mean(wins):,.0f}" if wins else "¥0")
-
-            with col2:
-                st.metric("亏损交易", f"{len(losses)}笔", f"总计 ¥{sum(losses):,.0f}")
-                st.metric("最大单笔亏损", f"¥{min(losses):,.0f}" if losses else "¥0")
-                st.metric("平均亏损", f"¥{np.mean(losses):,.0f}" if losses else "¥0")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("盈利交易", f"{len(wins)}笔")
+    with col2:
+        st.metric("盈利总额", f"¥{sum(wins):,.0f}" if wins else "¥0")
+    with col3:
+        st.metric("亏损交易", f"{len(losses)}笔")
+    with col4:
+        st.metric("亏损总额", f"¥{sum(losses):,.0f}" if losses else "¥0")
 
 
 def main():
     st.title("📊 期货策略回测系统")
-    st.markdown("*支持多策略选择和动态参数配置*")
 
-    # 侧边栏配置
-    symbol, file_path, params, initial_capital, strategy_class = render_sidebar()
+    # 主导航
+    page = st.sidebar.radio(
+        "导航",
+        options=["📈 策略回测", "📥 数据管理"],
+        index=0
+    )
 
-    # 检查文件
-    if not file_path or not os.path.exists(file_path):
-        st.warning("请在侧边栏选择数据文件")
-        st.info("""
-        **数据格式要求:**
-        - CSV文件，包含列: time, open, high, low, close, volume (可选)
-        - time格式: YYYY-MM-DD 或 YYYY/MM/DD
-        """)
+    if page == "📥 数据管理":
+        render_data_management()
 
-        # 显示已加载策略
-        st.subheader("📋 已加载策略")
-        strategies = list_strategies()
-        for s in strategies:
-            with st.expander(f"**{s['display_name']}** ({s['name']})"):
-                st.write(f"*版本: {s['version']} | 作者: {s['author']}*")
-                st.markdown(s['description'])
-                st.write("**参数列表:**")
-                for p in s['params']:
-                    st.write(f"- {p['label']} ({p['name']}): 默认={p['default']}, 范围=[{p['min_val']}, {p['max_val']}]")
-        return
+    else:  # 策略回测
+        config = render_backtest_page()
 
-    # 加载数据
-    try:
-        df_data = load_data(file_path)
-        st.sidebar.success(f"✅ 已加载 {len(df_data)} 条数据")
-        st.sidebar.caption(f"{df_data['time'].min().strftime('%Y-%m-%d')} ~ {df_data['time'].max().strftime('%Y-%m-%d')}")
-    except Exception as e:
-        st.error(f"加载数据失败: {e}")
-        return
+        # 结果显示区域
+        if config is None:
+            return
 
-    # 运行回测按钮
-    if st.sidebar.button("🚀 运行回测", type="primary", use_container_width=True):
-        with st.spinner(f"正在使用 {strategy_class.display_name} 策略回测..."):
-            try:
-                # 创建策略实例
-                strategy_instance = strategy_class(params)
-                # 使用新的回测函数
-                result = run_backtest_with_strategy(df_data, symbol, strategy_instance, initial_capital)
-                st.session_state['result'] = result
-                st.session_state['df_data'] = df_data
-                st.session_state['params'] = params
-                st.session_state['strategy_class'] = strategy_class
-                st.success(f"✅ 回测完成! 共 {len(result.trades)} 笔交易")
-            except Exception as e:
-                st.error(f"回测失败: {e}")
-                import traceback
-                st.code(traceback.format_exc())
-                return
+        result_container = st.container()
 
-    # 显示结果
-    if 'result' in st.session_state:
-        result = st.session_state['result']
-        df_data = st.session_state['df_data']
-        params = st.session_state['params']
-        strategy_class = st.session_state.get('strategy_class', None)
+        # 运行回测
+        if config['run_backtest']:
+            run_backtest_and_display(config, result_container)
 
-        # 标签页
-        tabs = st.tabs(["📊 概览", "💹 资金曲线", "📈 K线分析", "📋 交易记录", "📉 统计分析"])
+        # 显示已有结果
+        if 'result' in st.session_state:
+            result = st.session_state['result']
 
-        with tabs[0]:
-            render_overview(result)
+            with result_container:
+                # 标签页
+                tabs = st.tabs(["📊 概览", "💹 资金曲线", "📋 交易记录", "📉 统计分析"])
 
-        with tabs[1]:
-            render_equity_chart(result)
+                with tabs[0]:
+                    render_overview(result)
 
-        with tabs[2]:
-            if strategy_class:
-                render_kline_analysis(result, df_data, params, strategy_class)
-            else:
-                st.warning("需要策略类信息来渲染K线分析")
+                with tabs[1]:
+                    render_equity_chart(result)
 
-        with tabs[3]:
-            render_trades_table(result)
+                with tabs[2]:
+                    render_trades_table(result)
 
-        with tabs[4]:
-            render_statistics(result)
-
-    else:
-        st.info("👈 请在侧边栏配置参数后点击「运行回测」")
-
-        # 显示品种信息
-        st.subheader("📌 支持的品种")
-        inst_data = []
-        for sym, inst in INSTRUMENTS.items():
-            inst_data.append({
-                '代码': sym,
-                '名称': inst['name'],
-                '交易所': inst['exchange'],
-                '乘数': inst['multiplier'],
-                '最小变动': inst['price_tick'],
-                '保证金': f"{inst['margin_rate']*100:.0f}%",
-                '夜盘': '是' if inst['night_trade'] else '否'
-            })
-        st.dataframe(pd.DataFrame(inst_data), use_container_width=True, hide_index=True)
+                with tabs[3]:
+                    render_statistics(result)
 
 
 if __name__ == '__main__':
