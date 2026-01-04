@@ -1,0 +1,60 @@
+# Brother2v6 策略配置 - 股指期货IF
+# 类似 banbot 风格的配置文件
+
+name: backtest_brother2v6
+env: backtest
+leverage: 1
+market_type: futures
+contract_type: index
+initial_capital: 1000000
+
+# 回测时间范围
+time_start: "20150101"
+time_end: "20251231"
+
+# 策略配置
+run_policy:
+  name: brother2v6
+  timeframes: 日线
+  params:
+    # ========== 趋势参数 ==========
+    sml_len: 12          # 短期EMA周期
+    big_len: 50          # 长期EMA周期
+    break_len: 30        # 突破周期
+
+    # ========== 指标参数 ==========
+    atr_len: 20          # ATR周期
+    adx_len: 14          # ADX周期
+    adx_thres: 22.0      # ADX阈值
+    chop_len: 14         # CHOP周期
+    chop_thres: 50.0     # CHOP阈值
+
+    # ========== 成交量确认 ==========
+    vol_len: 20          # 均量周期
+    vol_multi: 1.3       # 放量倍数
+
+    # ========== 止损参数 ==========
+    stop_n: 3.0          # 初始止损ATR倍数
+    min_stop_n: 2.0      # 最小止损ATR倍数
+
+    # ========== 止盈参数 ==========
+    break_even_pct: 10.0      # 保本触发%
+    partial_trigger_pct: 12.0 # 分批止盈触发%
+    partial_drawdown_pct: 4.0 # 分批止盈回撤%
+    partial_rate: 50.0        # 分批止盈比例%
+    full_drawdown_pct: 8.0    # 剩余止盈回撤%
+
+    # ========== 仓位管理 ==========
+    capital_rate: 0.2    # 资金使用比例
+    risk_rate: 0.05      # 单次风险比例
+
+# 交易品种
+pairs:
+  - IF
+
+# 交易所配置
+exchange:
+  name: cffex
+  fees:
+    maker: 0.000023
+    taker: 0.000023
