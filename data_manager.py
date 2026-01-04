@@ -700,5 +700,169 @@ def get_symbol_list_by_category() -> Dict[str, List[Tuple[str, str]]]:
     return result
 
 
+# ============== 天勤数据支持 ==============
+
+# 天勤数据库路径
+TQ_DB_PATH = os.path.join(DATA_DIR, "futures_tq.db")
+
+# 周期映射 (天勤 -> 本地)
+TQ_PERIOD_MAP = {
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "60m": "60",
+    "1d": "日线",
+}
+
+
+def load_from_tianqin(
+    symbol: str,
+    period: str = "1d",
+    start_date: str = None,
+    end_date: str = None
+) -> pd.DataFrame:
+    """
+    从天勤数据库加载数据
+
+    Args:
+        symbol: 品种代码 (IF, AU, RB等)
+        period: 周期 ('5m', '15m', '30m', '60m', '1d')
+        start_date: 开始日期 (YYYY-MM-DD)
+        end_date: 结束日期 (YYYY-MM-DD)
+
+    Returns:
+        DataFrame with columns: time, open, high, low, close, volume, open_interest
+    """
+    if not os.path.exists(TQ_DB_PATH):
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(TQ_DB_PATH)
+
+    query = """
+        SELECT datetime as time, open, high, low, close, volume, open_interest
+        FROM kline_data
+        WHERE symbol = ? AND period = ?
+    """
+    params = [symbol.upper(), period]
+
+    if start_date:
+        query += " AND datetime >= ?"
+        params.append(start_date)
+
+    if end_date:
+        query += " AND datetime <= ?"
+        params.append(end_date + " 23:59:59")
+
+    query += " ORDER BY datetime"
+
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+
+        if len(df) > 0:
+            df['time'] = pd.to_datetime(df['time'])
+
+        return df
+    except Exception as e:
+        conn.close()
+        return pd.DataFrame()
+
+
+def get_tianqin_data_status() -> pd.DataFrame:
+    """获取天勤数据库中的数据状态"""
+    if not os.path.exists(TQ_DB_PATH):
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(TQ_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                symbol,
+                period,
+                COUNT(*) as record_count,
+                MIN(datetime) as start_date,
+                MAX(datetime) as end_date
+            FROM kline_data
+            GROUP BY symbol, period
+            ORDER BY symbol, period
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except:
+        conn.close()
+        return pd.DataFrame()
+
+
+def load_data_auto(
+    symbol: str,
+    period: str = "日线",
+    start_date: str = None,
+    end_date: str = None
+) -> pd.DataFrame:
+    """
+    自动选择最佳数据源加载数据
+
+    优先级: 天勤 > 本地数据库 > akshare下载
+
+    Args:
+        symbol: 品种代码
+        period: 周期 ('5分钟', '15分钟', '30分钟', '60分钟', '日线' 或 '5m', '15m', '30m', '60m', '1d')
+        start_date: 开始日期
+        end_date: 结束日期
+
+    Returns:
+        DataFrame
+    """
+    # 标准化周期格式
+    period_map = {
+        "5分钟": "5m", "15分钟": "15m", "30分钟": "30m", "60分钟": "60m", "日线": "1d",
+        "5m": "5m", "15m": "15m", "30m": "30m", "60m": "60m", "1d": "1d",
+        "5": "5m", "15": "15m", "30": "30m", "60": "60m",
+    }
+    tq_period = period_map.get(period, "1d")
+
+    # 1. 尝试从天勤数据库加载
+    df = load_from_tianqin(symbol, tq_period, start_date, end_date)
+    if len(df) > 0:
+        return df
+
+    # 2. 尝试从本地数据库加载
+    if tq_period == "1d":
+        df = load_from_database(symbol, start_date, end_date)
+        if len(df) > 0:
+            return df
+    else:
+        # 分钟数据
+        local_period = {"5m": "5", "15m": "15", "30m": "30", "60m": "60"}.get(tq_period)
+        if local_period:
+            df = load_minute_from_database(symbol, local_period, start_date, end_date)
+            if len(df) > 0:
+                return df
+
+    # 3. 如果没有本地数据，尝试下载
+    if tq_period == "1d":
+        download_df = download_from_akshare(symbol, start_date, end_date)
+        if download_df is not None and len(download_df) > 0:
+            # 保存到数据库
+            if symbol in FUTURES_SYMBOLS:
+                _, exchange, _ = FUTURES_SYMBOLS[symbol]
+                save_to_database(symbol, exchange, download_df)
+            return download_df
+    else:
+        # 分钟数据从akshare下载
+        local_period = {"5m": "5", "15m": "15", "30m": "30", "60m": "60"}.get(tq_period)
+        if local_period:
+            download_df = download_minute_from_akshare(symbol, local_period)
+            if download_df is not None and len(download_df) > 0:
+                if symbol in FUTURES_SYMBOLS:
+                    _, exchange, _ = FUTURES_SYMBOLS[symbol]
+                    save_minute_to_database(symbol, exchange, local_period, download_df)
+                return download_df
+
+    return pd.DataFrame()
+
+
 # 初始化数据库
 init_database()
