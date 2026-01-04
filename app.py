@@ -358,6 +358,25 @@ def render_backtest_page():
 
         st.caption(f"数据范围: {data_start} ~ {data_end}")
 
+        # 显示合约规格
+        inst = get_instrument(symbol)
+        if inst:
+            with st.expander("📋 合约规格", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("合约乘数", f"{inst['multiplier']}")
+                    st.metric("最小变动", f"{inst['price_tick']}")
+                with col2:
+                    st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
+                    if inst['commission_fixed'] > 0:
+                        st.metric("手续费", f"{inst['commission_fixed']}元/手")
+                    else:
+                        st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
+
+                # 合约价值示例
+                st.caption(f"💡 若价格10000，1手合约价值 = 10000 × {inst['multiplier']} = {10000 * inst['multiplier']:,}元")
+                st.caption(f"💡 1手保证金约 = {10000 * inst['multiplier'] * inst['margin_rate']:,.0f}元")
+
         st.markdown("---")
 
         # ========== 时间周期 ==========
@@ -497,6 +516,27 @@ def run_backtest_and_display(config, result_container):
 def render_overview(result):
     """渲染概览页"""
     st.subheader("📊 回测概览")
+
+    # 显示合约规格信息
+    inst = get_instrument(result.symbol)
+    if inst:
+        with st.expander(f"📋 {result.symbol} 合约规格 (回测使用)", expanded=False):
+            cols = st.columns(6)
+            with cols[0]:
+                st.metric("品种", inst['name'])
+            with cols[1]:
+                st.metric("合约乘数", f"{inst['multiplier']}")
+            with cols[2]:
+                st.metric("最小变动", f"{inst['price_tick']}")
+            with cols[3]:
+                st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
+            with cols[4]:
+                if inst['commission_fixed'] > 0:
+                    st.metric("手续费", f"{inst['commission_fixed']}元/手")
+                else:
+                    st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
+            with cols[5]:
+                st.metric("交易所", inst['exchange'])
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
