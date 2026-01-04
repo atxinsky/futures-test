@@ -20,7 +20,8 @@ from config import INSTRUMENTS, get_instrument, EXCHANGES
 from engine import run_backtest, run_backtest_with_strategy, calculate_indicators
 from data_manager import (
     get_data_status, download_symbol, download_batch, load_from_database,
-    get_symbol_list_by_category, FUTURES_SYMBOLS, export_to_csv
+    get_symbol_list_by_category, FUTURES_SYMBOLS, export_to_csv,
+    MINUTE_PERIODS, download_minute_symbol, load_minute_from_database, get_minute_data_status
 )
 from strategies import (
     get_all_strategies, get_strategy, list_strategies,
@@ -170,7 +171,7 @@ def render_data_management():
     """渲染数据管理页面"""
     st.header("📥 数据管理")
 
-    tab1, tab2 = st.tabs(["下载数据", "数据状态"])
+    tab1, tab2, tab3 = st.tabs(["日线数据", "分钟数据", "数据状态"])
 
     with tab1:
         st.subheader("下载期货数据")
@@ -243,11 +244,87 @@ def render_data_management():
             st.info("请选择要下载的品种")
 
     with tab2:
+        st.subheader("下载分钟数据")
+        st.info("💡 分钟数据来自新浪财经，约有最近1000根K线")
+
+        # 按类别选择品种
+        categories = get_symbol_list_by_category()
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            category_min = st.selectbox(
+                "选择类别 ",
+                options=list(categories.keys()),
+                key="minute_category"
+            )
+
+            symbols_in_cat_min = categories[category_min]
+            selected_symbols_min = st.multiselect(
+                "选择品种 ",
+                options=[s[0] for s in symbols_in_cat_min],
+                format_func=lambda x: f"{x} - {FUTURES_SYMBOLS[x][0]}",
+                default=[],
+                key="minute_symbols"
+            )
+
+        with col2:
+            # 选择周期
+            st.write("**选择周期:**")
+            selected_periods = st.multiselect(
+                "K线周期",
+                options=list(MINUTE_PERIODS.keys()),
+                default=["60分钟"],
+                key="minute_periods"
+            )
+
+        st.markdown("---")
+
+        # 下载按钮
+        if selected_symbols_min and selected_periods:
+            total_tasks = len(selected_symbols_min) * len(selected_periods)
+            st.write(f"已选择 **{len(selected_symbols_min)}** 个品种, **{len(selected_periods)}** 个周期, 共 **{total_tasks}** 个任务")
+
+            if st.button("🚀 开始下载分钟数据", type="primary", use_container_width=True):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                results_container = st.container()
+
+                results = {}
+                task_idx = 0
+                for symbol in selected_symbols_min:
+                    for period_name in selected_periods:
+                        period = MINUTE_PERIODS[period_name]
+                        status_text.text(f"正在下载 {symbol} {period_name} ({task_idx+1}/{total_tasks})...")
+                        progress_bar.progress((task_idx + 1) / total_tasks)
+
+                        success, msg, count = download_minute_symbol(symbol, period)
+                        results[f"{symbol}_{period}"] = (success, msg, count)
+                        task_idx += 1
+
+                status_text.text("下载完成!")
+
+                # 显示结果
+                with results_container:
+                    success_count = sum(1 for r in results.values() if r[0])
+                    st.success(f"成功下载 {success_count}/{len(results)} 个任务")
+
+                    for key, (success, msg, count) in results.items():
+                        if success:
+                            st.write(f"✅ {msg} - {count}条数据")
+                        else:
+                            st.write(f"❌ {msg}")
+        else:
+            st.info("请选择要下载的品种和周期")
+
+    with tab3:
         st.subheader("数据状态")
 
         if st.button("🔄 刷新数据状态"):
             st.cache_data.clear()
 
+        # 日线数据状态
+        st.write("### 📊 日线数据")
         df_status = get_data_status()
 
         # 筛选有数据的品种
@@ -261,10 +338,24 @@ def render_data_management():
             st.metric("无数据品种", len(df_no_data))
 
         if len(df_with_data) > 0:
-            st.write("**已下载数据:**")
             df_display = df_with_data[['symbol', 'name', 'exchange', 'start_date', 'end_date', 'record_count']].copy()
             df_display.columns = ['代码', '名称', '交易所', '起始日期', '结束日期', '数据条数']
             st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # 分钟数据状态
+        st.write("### ⏱️ 分钟数据")
+        df_minute_status = get_minute_data_status()
+
+        if len(df_minute_status) > 0:
+            # 添加品种名称
+            df_minute_status['name'] = df_minute_status['symbol'].apply(
+                lambda x: FUTURES_SYMBOLS.get(x, ('未知',))[0]
+            )
+            df_minute_display = df_minute_status[['symbol', 'name', 'period', 'start_time', 'end_time', 'record_count']].copy()
+            df_minute_display.columns = ['代码', '名称', '周期(分钟)', '起始时间', '结束时间', '数据条数']
+            st.dataframe(df_minute_display, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无分钟数据，请先下载")
 
 
 def render_backtest_page():
@@ -328,7 +419,7 @@ def render_backtest_page():
         st.write("**⏱️ 时间周期**")
         time_period = st.selectbox(
             "K线周期",
-            options=["日线", "周线", "月线"],
+            options=["日线", "周线", "月线", "60分钟", "30分钟", "15分钟", "5分钟"],
             index=0
         )
 
@@ -409,19 +500,36 @@ def run_backtest_and_display(config, result_container):
     with result_container:
         with st.spinner(f"正在使用 {config['strategy_class'].display_name} 策略回测..."):
             try:
-                # 加载数据
-                df_data = load_from_database(
-                    config['symbol'],
-                    config['start_date'],
-                    config['end_date']
-                )
+                time_period = config['time_period']
 
-                if len(df_data) == 0:
-                    st.error("没有数据，请先下载数据")
-                    return
+                # 根据周期类型加载数据
+                if time_period in ["5分钟", "15分钟", "30分钟", "60分钟"]:
+                    # 加载分钟数据
+                    period_map = {"5分钟": "5", "15分钟": "15", "30分钟": "30", "60分钟": "60"}
+                    period = period_map[time_period]
+                    df_data = load_minute_from_database(
+                        config['symbol'],
+                        period,
+                        config['start_date'],
+                        config['end_date']
+                    )
+                    if len(df_data) == 0:
+                        st.error(f"没有 {time_period} 数据，请先在「数据管理」页面下载分钟数据")
+                        return
+                else:
+                    # 加载日线数据
+                    df_data = load_from_database(
+                        config['symbol'],
+                        config['start_date'],
+                        config['end_date']
+                    )
 
-                # 重采样到指定周期
-                df_data = resample_data(df_data, config['time_period'])
+                    if len(df_data) == 0:
+                        st.error("没有数据，请先下载数据")
+                        return
+
+                    # 重采样到指定周期 (周线/月线)
+                    df_data = resample_data(df_data, time_period)
 
                 st.info(f"数据: {len(df_data)} 条 ({config['start_date']} ~ {config['end_date']}) - {config['time_period']}")
 

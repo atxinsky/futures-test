@@ -141,6 +141,27 @@ def init_database():
     # 创建索引
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_symbol_time ON futures_daily(symbol, time)')
 
+    # 创建期货分钟数据表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS futures_minute (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            period TEXT NOT NULL,
+            time DATETIME NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            open_interest REAL,
+            UNIQUE(symbol, period, time)
+        )
+    ''')
+
+    # 创建分钟数据索引
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_symbol_period_time ON futures_minute(symbol, period, time)')
+
     # 创建数据更新记录表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS data_update_log (
@@ -149,6 +170,19 @@ def init_database():
             start_date DATE,
             end_date DATE,
             record_count INTEGER
+        )
+    ''')
+
+    # 创建分钟数据更新记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS minute_update_log (
+            symbol TEXT NOT NULL,
+            period TEXT NOT NULL,
+            last_update DATETIME,
+            start_time DATETIME,
+            end_time DATETIME,
+            record_count INTEGER,
+            PRIMARY KEY(symbol, period)
         )
     ''')
 
@@ -270,7 +304,7 @@ def load_from_database(symbol: str, start_date: str = None, end_date: str = None
 
 
 def download_from_akshare(symbol: str, start_date: str = None, end_date: str = None) -> Optional[pd.DataFrame]:
-    """使用akshare下载数据"""
+    """使用akshare下载日线数据"""
     try:
         import akshare as ak
 
@@ -313,6 +347,198 @@ def download_from_akshare(symbol: str, start_date: str = None, end_date: str = N
     except Exception as e:
         print(f"akshare下载失败 {symbol}: {e}")
         return None
+
+
+# 分钟周期映射
+MINUTE_PERIODS = {
+    "5分钟": "5",
+    "15分钟": "15",
+    "30分钟": "30",
+    "60分钟": "60",
+}
+
+
+def download_minute_from_akshare(symbol: str, period: str = "60") -> Optional[pd.DataFrame]:
+    """
+    使用akshare下载分钟数据
+
+    参数:
+        symbol: 品种代码如 AU, RB
+        period: 周期 '5', '15', '30', '60'
+
+    返回:
+        DataFrame 包含 time, open, high, low, close, volume, open_interest
+    """
+    try:
+        import akshare as ak
+
+        # 使用 futures_zh_minute_sina 接口
+        sina_symbol = f"{symbol.upper()}0"
+        df = ak.futures_zh_minute_sina(symbol=sina_symbol, period=period)
+
+        if df is None or len(df) == 0:
+            return None
+
+        # 标准化列名
+        df = df.rename(columns={
+            'datetime': 'time',
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'volume': 'volume',
+            'hold': 'open_interest'
+        })
+
+        # 确保必要的列存在
+        required_cols = ['time', 'open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in df.columns:
+                print(f"分钟数据缺少列: {col}")
+                return None
+
+        df['time'] = pd.to_datetime(df['time'])
+        df = df.sort_values('time').reset_index(drop=True)
+
+        return df
+
+    except Exception as e:
+        print(f"akshare分钟数据下载失败 {symbol} {period}分钟: {e}")
+        return None
+
+
+def save_minute_to_database(symbol: str, exchange: str, period: str, df: pd.DataFrame) -> int:
+    """保存分钟数据到数据库"""
+    if df is None or len(df) == 0:
+        return 0
+
+    init_database()
+    conn = sqlite3.connect(DB_PATH)
+
+    # 准备数据
+    df = df.copy()
+    df['symbol'] = symbol
+    df['exchange'] = exchange
+    df['period'] = period
+
+    # 确保列名正确
+    cols = ['symbol', 'exchange', 'period', 'time', 'open', 'high', 'low', 'close', 'volume']
+    if 'open_interest' in df.columns:
+        cols.append('open_interest')
+    else:
+        df['open_interest'] = 0
+        cols.append('open_interest')
+
+    df = df[cols]
+    df['time'] = pd.to_datetime(df['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # 插入数据 (忽略重复)
+    inserted = 0
+    for _, row in df.iterrows():
+        try:
+            conn.execute('''
+                INSERT OR REPLACE INTO futures_minute
+                (symbol, exchange, period, time, open, high, low, close, volume, open_interest)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', tuple(row))
+            inserted += 1
+        except Exception:
+            pass
+
+    conn.commit()
+
+    # 更新日志
+    conn.execute('''
+        INSERT OR REPLACE INTO minute_update_log (symbol, period, last_update, start_time, end_time, record_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (symbol, period, datetime.now().isoformat(), df['time'].min(), df['time'].max(), len(df)))
+
+    conn.commit()
+    conn.close()
+
+    return inserted
+
+
+def load_minute_from_database(symbol: str, period: str, start_time: str = None, end_time: str = None) -> pd.DataFrame:
+    """从数据库加载分钟数据"""
+    init_database()
+    conn = sqlite3.connect(DB_PATH)
+
+    query = 'SELECT time, open, high, low, close, volume, open_interest FROM futures_minute WHERE symbol = ? AND period = ?'
+    params = [symbol, period]
+
+    if start_time:
+        query += ' AND time >= ?'
+        params.append(start_time)
+    if end_time:
+        query += ' AND time <= ?'
+        params.append(end_time)
+
+    query += ' ORDER BY time'
+
+    df = pd.read_sql(query, conn, params=params)
+    conn.close()
+
+    if len(df) > 0:
+        df['time'] = pd.to_datetime(df['time'])
+
+    return df
+
+
+def download_minute_symbol(
+    symbol: str,
+    period: str = "60",
+    save_to_db: bool = True
+) -> Tuple[bool, str, int]:
+    """
+    下载单个品种的分钟数据
+
+    参数:
+        symbol: 品种代码
+        period: 周期 '5', '15', '30', '60'
+        save_to_db: 是否保存到数据库
+
+    返回: (成功与否, 消息, 数据条数)
+    """
+    if symbol not in FUTURES_SYMBOLS:
+        return False, f"未知品种: {symbol}", 0
+
+    name, exchange, list_date = FUTURES_SYMBOLS[symbol]
+
+    # 下载数据
+    df = download_minute_from_akshare(symbol, period)
+
+    if df is None or len(df) == 0:
+        return False, f"{symbol} ({name}) {period}分钟 无数据", 0
+
+    # 保存到数据库
+    if save_to_db:
+        count = save_minute_to_database(symbol, exchange, period, df)
+        return True, f"{symbol} ({name}) {period}分钟 下载成功", count
+    else:
+        return True, f"{symbol} ({name}) {period}分钟 下载成功", len(df)
+
+
+def get_minute_data_status() -> pd.DataFrame:
+    """获取所有品种的分钟数据状态"""
+    init_database()
+    conn = sqlite3.connect(DB_PATH)
+
+    # 查询每个品种每个周期的数据情况
+    query = '''
+        SELECT
+            symbol,
+            period,
+            MIN(time) as start_time,
+            MAX(time) as end_time,
+            COUNT(*) as record_count
+        FROM futures_minute
+        GROUP BY symbol, period
+    '''
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    return df
 
 
 def download_from_tushare(symbol: str, start_date: str = None, end_date: str = None, token: str = None) -> Optional[pd.DataFrame]:
