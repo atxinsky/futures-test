@@ -825,13 +825,20 @@ def render_kline_with_trades(result, df_data):
 
     st.write(f"显示 **{len(filtered_trades)}** / {len(result.trades)} 笔交易")
 
+    # 计算价格范围，用于固定Y轴
+    price_min = df_data['low'].min()
+    price_max = df_data['high'].max()
+    price_range = price_max - price_min
+    y_min = price_min - price_range * 0.05  # 下方留5%空间
+    y_max = price_max + price_range * 0.08  # 上方留8%空间（给标记文字）
+
     # 创建K线图
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.6, 0.2, 0.2],
-        subplot_titles=('K线 + 交易标记', '成交量', '持仓盈亏')
+        vertical_spacing=0.02,
+        row_heights=[0.7, 0.15, 0.15],
+        subplot_titles=('', '', '')  # 移除子图标题，节省空间
     )
 
     # K线图
@@ -975,10 +982,12 @@ def render_kline_with_trades(result, df_data):
                 row=1, col=1
             )
 
-            # 持仓区间背景色
-            fig.add_vrect(
+            # 持仓区间背景色 - 使用 shape 并限制在价格范围内
+            fig.add_shape(
+                type="rect",
                 x0=t.entry_time, x1=t.exit_time,
-                fillcolor='rgba(76, 175, 80, 0.1)' if is_win else 'rgba(244, 67, 54, 0.1)',
+                y0=y_min, y1=y_max,
+                fillcolor='rgba(76, 175, 80, 0.15)' if is_win else 'rgba(244, 67, 54, 0.15)',
                 layer='below',
                 line_width=0,
                 row=1, col=1
@@ -987,27 +996,36 @@ def render_kline_with_trades(result, df_data):
     # 如果选择了特定交易，聚焦到该交易
     if selected_trade_idx is not None and selected_trade_idx < len(result.trades):
         selected_trade = result.trades[selected_trade_idx]
-        # 计算显示范围（交易前后各20根K线）
+        # 计算显示范围（交易前后各30根K线）
         trade_start = selected_trade.entry_time
         trade_end = selected_trade.exit_time if selected_trade.exit_time else trade_start
 
         # 找到对应的索引
         try:
-            start_idx = df_data[df_data['time'] <= trade_start].index[-1] - 20
-            end_idx = df_data[df_data['time'] >= trade_end].index[0] + 20
+            start_idx = df_data[df_data['time'] <= trade_start].index[-1] - 30
+            end_idx = df_data[df_data['time'] >= trade_end].index[0] + 30
             start_idx = max(0, start_idx)
             end_idx = min(len(df_data) - 1, end_idx)
 
             x_start = df_data.iloc[start_idx]['time']
             x_end = df_data.iloc[end_idx]['time']
 
+            # 计算这段时间的价格范围
+            visible_data = df_data.iloc[start_idx:end_idx+1]
+            vis_min = visible_data['low'].min()
+            vis_max = visible_data['high'].max()
+            vis_range = vis_max - vis_min
+            y_min = vis_min - vis_range * 0.05
+            y_max = vis_max + vis_range * 0.10
+
             fig.update_xaxes(range=[x_start, x_end])
+            fig.update_yaxes(range=[y_min, y_max], row=1, col=1)
         except:
             pass
 
     # 更新布局
     fig.update_layout(
-        height=800,
+        height=700,
         hovermode='x unified',
         showlegend=True,
         legend=dict(
@@ -1017,12 +1035,14 @@ def render_kline_with_trades(result, df_data):
             xanchor="right",
             x=1
         ),
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=50, r=50, t=30, b=30)
     )
 
-    fig.update_yaxes(title_text="价格", row=1, col=1)
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
-    fig.update_yaxes(title_text="盈亏%", row=3, col=1)
+    # 固定K线图Y轴范围，防止被挤压
+    fig.update_yaxes(title_text="价格", row=1, col=1, range=[y_min, y_max], fixedrange=False)
+    fig.update_yaxes(title_text="量", row=2, col=1)
+    fig.update_yaxes(title_text="%", row=3, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
