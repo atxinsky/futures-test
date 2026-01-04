@@ -775,6 +775,279 @@ def render_trades_table(result):
     )
 
 
+def render_kline_with_trades(result, df_data):
+    """渲染K线图并标记交易"""
+    st.subheader("📈 K线交易图")
+
+    if not result.trades:
+        st.warning("没有交易记录")
+        return
+
+    if df_data is None or len(df_data) == 0:
+        st.warning("没有K线数据")
+        return
+
+    # 筛选器
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        result_filter = st.multiselect(
+            "筛选结果",
+            options=['盈利', '亏损'],
+            default=['盈利', '亏损'],
+            key="kline_result_filter"
+        )
+
+    with col2:
+        exit_tags = list(set([t.exit_tag for t in result.trades]))
+        tag_filter = st.multiselect(
+            "筛选出场原因",
+            options=exit_tags,
+            default=exit_tags,
+            key="kline_tag_filter"
+        )
+
+    with col3:
+        # 选择要查看的交易
+        trade_options = [f"#{t.trade_id+1} {t.entry_time.strftime('%m-%d')}→{t.exit_time.strftime('%m-%d') if t.exit_time else ''} {'盈' if t.pnl > 0 else '亏'}{abs(t.pnl_pct):.1f}%"
+                        for t in result.trades]
+        selected_trade_idx = st.selectbox(
+            "跳转到交易",
+            options=range(len(trade_options)),
+            format_func=lambda x: trade_options[x],
+            key="kline_trade_select"
+        )
+
+    # 筛选交易
+    filtered_trades = [t for t in result.trades
+                      if (('盈利' in result_filter and t.pnl > 0) or ('亏损' in result_filter and t.pnl <= 0))
+                      and t.exit_tag in tag_filter]
+
+    st.write(f"显示 **{len(filtered_trades)}** / {len(result.trades)} 笔交易")
+
+    # 创建K线图
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.6, 0.2, 0.2],
+        subplot_titles=('K线 + 交易标记', '成交量', '持仓盈亏')
+    )
+
+    # K线图
+    fig.add_trace(
+        go.Candlestick(
+            x=df_data['time'],
+            open=df_data['open'],
+            high=df_data['high'],
+            low=df_data['low'],
+            close=df_data['close'],
+            name='K线',
+            increasing_line_color='#EF5350',  # 红涨
+            decreasing_line_color='#26A69A',  # 绿跌
+            increasing_fillcolor='#EF5350',
+            decreasing_fillcolor='#26A69A'
+        ),
+        row=1, col=1
+    )
+
+    # 成交量
+    colors = ['#EF5350' if close >= open else '#26A69A'
+              for close, open in zip(df_data['close'], df_data['open'])]
+    fig.add_trace(
+        go.Bar(
+            x=df_data['time'],
+            y=df_data['volume'],
+            name='成交量',
+            marker_color=colors,
+            opacity=0.7
+        ),
+        row=2, col=1
+    )
+
+    # 持仓盈亏曲线（每笔交易期间）
+    holding_pnl = []
+    holding_time = []
+    for t in filtered_trades:
+        # 获取持仓期间的数据
+        mask = (df_data['time'] >= t.entry_time) & (df_data['time'] <= t.exit_time)
+        trade_data = df_data[mask]
+        for _, row in trade_data.iterrows():
+            pnl_pct = (row['close'] - t.entry_price) / t.entry_price * 100
+            holding_pnl.append(pnl_pct)
+            holding_time.append(row['time'])
+
+    if holding_pnl:
+        fig.add_trace(
+            go.Scatter(
+                x=holding_time,
+                y=holding_pnl,
+                mode='lines',
+                name='持仓盈亏%',
+                line=dict(color='#FF9800', width=1),
+                fill='tozeroy',
+                fillcolor='rgba(255, 152, 0, 0.2)'
+            ),
+            row=3, col=1
+        )
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
+
+    # 标记交易入场和出场
+    for t in filtered_trades:
+        is_win = t.pnl > 0
+
+        # 入场标记 - 在K线下方
+        entry_low = df_data[df_data['time'] == t.entry_time]['low'].values
+        entry_y = entry_low[0] * 0.995 if len(entry_low) > 0 else t.entry_price
+
+        fig.add_trace(
+            go.Scatter(
+                x=[t.entry_time],
+                y=[entry_y],
+                mode='markers+text',
+                marker=dict(
+                    symbol='triangle-up',
+                    size=16,
+                    color='#2196F3',
+                    line=dict(color='white', width=1)
+                ),
+                text=[f'买{t.volume}手'],
+                textposition='bottom center',
+                textfont=dict(size=10, color='#2196F3'),
+                name=f'入场#{t.trade_id+1}',
+                showlegend=False,
+                hovertemplate=f"<b>入场 #{t.trade_id+1}</b><br>" +
+                             f"时间: {t.entry_time.strftime('%Y-%m-%d')}<br>" +
+                             f"价格: {t.entry_price:.2f}<br>" +
+                             f"手数: {t.volume}<extra></extra>"
+            ),
+            row=1, col=1
+        )
+
+        # 出场标记 - 在K线上方
+        if t.exit_time:
+            exit_high = df_data[df_data['time'] == t.exit_time]['high'].values
+            exit_y = exit_high[0] * 1.005 if len(exit_high) > 0 else t.exit_price
+
+            exit_color = '#4CAF50' if is_win else '#F44336'
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[t.exit_time],
+                    y=[exit_y],
+                    mode='markers+text',
+                    marker=dict(
+                        symbol='triangle-down',
+                        size=16,
+                        color=exit_color,
+                        line=dict(color='white', width=1)
+                    ),
+                    text=[f'{t.pnl_pct:+.1f}%'],
+                    textposition='top center',
+                    textfont=dict(size=10, color=exit_color, weight='bold'),
+                    name=f'出场#{t.trade_id+1}',
+                    showlegend=False,
+                    hovertemplate=f"<b>出场 #{t.trade_id+1}</b><br>" +
+                                 f"时间: {t.exit_time.strftime('%Y-%m-%d')}<br>" +
+                                 f"价格: {t.exit_price:.2f}<br>" +
+                                 f"盈亏: ¥{t.pnl:+,.0f} ({t.pnl_pct:+.2f}%)<br>" +
+                                 f"原因: {t.exit_tag}<br>" +
+                                 f"持仓: {t.holding_days}天<extra></extra>"
+                ),
+                row=1, col=1
+            )
+
+            # 连接入场和出场的线
+            fig.add_trace(
+                go.Scatter(
+                    x=[t.entry_time, t.exit_time],
+                    y=[t.entry_price, t.exit_price],
+                    mode='lines',
+                    line=dict(
+                        color=exit_color,
+                        width=2,
+                        dash='dot'
+                    ),
+                    opacity=0.6,
+                    showlegend=False,
+                    hoverinfo='skip'
+                ),
+                row=1, col=1
+            )
+
+            # 持仓区间背景色
+            fig.add_vrect(
+                x0=t.entry_time, x1=t.exit_time,
+                fillcolor='rgba(76, 175, 80, 0.1)' if is_win else 'rgba(244, 67, 54, 0.1)',
+                layer='below',
+                line_width=0,
+                row=1, col=1
+            )
+
+    # 如果选择了特定交易，聚焦到该交易
+    if selected_trade_idx is not None and selected_trade_idx < len(result.trades):
+        selected_trade = result.trades[selected_trade_idx]
+        # 计算显示范围（交易前后各20根K线）
+        trade_start = selected_trade.entry_time
+        trade_end = selected_trade.exit_time if selected_trade.exit_time else trade_start
+
+        # 找到对应的索引
+        try:
+            start_idx = df_data[df_data['time'] <= trade_start].index[-1] - 20
+            end_idx = df_data[df_data['time'] >= trade_end].index[0] + 20
+            start_idx = max(0, start_idx)
+            end_idx = min(len(df_data) - 1, end_idx)
+
+            x_start = df_data.iloc[start_idx]['time']
+            x_end = df_data.iloc[end_idx]['time']
+
+            fig.update_xaxes(range=[x_start, x_end])
+        except:
+            pass
+
+    # 更新布局
+    fig.update_layout(
+        height=800,
+        hovermode='x unified',
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        xaxis_rangeslider_visible=False
+    )
+
+    fig.update_yaxes(title_text="价格", row=1, col=1)
+    fig.update_yaxes(title_text="成交量", row=2, col=1)
+    fig.update_yaxes(title_text="盈亏%", row=3, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 显示选中交易的详情
+    if selected_trade_idx is not None and selected_trade_idx < len(result.trades):
+        t = result.trades[selected_trade_idx]
+        st.markdown("---")
+        st.write(f"### 交易 #{t.trade_id+1} 详情")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("入场时间", t.entry_time.strftime('%Y-%m-%d'))
+            st.metric("入场价格", f"{t.entry_price:.2f}")
+        with col2:
+            st.metric("出场时间", t.exit_time.strftime('%Y-%m-%d') if t.exit_time else '-')
+            st.metric("出场价格", f"{t.exit_price:.2f}" if t.exit_price else '-')
+        with col3:
+            st.metric("持仓天数", f"{t.holding_days}天")
+            st.metric("交易手数", f"{t.volume}手")
+        with col4:
+            pnl_color = "normal" if t.pnl > 0 else "inverse"
+            st.metric("盈亏金额", f"¥{t.pnl:+,.0f}", delta=f"{t.pnl_pct:+.2f}%")
+            st.metric("出场原因", t.exit_tag)
+
+
 def render_statistics(result):
     """渲染统计分析"""
     st.subheader("📊 统计分析")
@@ -858,21 +1131,25 @@ def main():
         # 显示已有结果
         if 'result' in st.session_state:
             result = st.session_state['result']
+            df_data = st.session_state.get('df_data', None)
 
             with result_container:
                 # 标签页
-                tabs = st.tabs(["📊 概览", "💹 资金曲线", "📋 交易记录", "📉 统计分析"])
+                tabs = st.tabs(["📊 概览", "📈 K线交易图", "💹 资金曲线", "📋 交易记录", "📉 统计分析"])
 
                 with tabs[0]:
                     render_overview(result)
 
                 with tabs[1]:
-                    render_equity_chart(result)
+                    render_kline_with_trades(result, df_data)
 
                 with tabs[2]:
-                    render_trades_table(result)
+                    render_equity_chart(result)
 
                 with tabs[3]:
+                    render_trades_table(result)
+
+                with tabs[4]:
                     render_statistics(result)
 
 
