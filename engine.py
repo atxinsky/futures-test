@@ -187,10 +187,22 @@ def run_backtest_with_strategy(
             # 计算合理仓位（考虑品种乘数）
             stake_amt = capital * strategy.params.get('capital_rate', 1.0)
             risk_per_trade = stake_amt * strategy.params.get('risk_rate', 0.02)
-            stop_dist = signal.stop_loss if signal.stop_loss > 0 else signal.price * 0.02
-
-            amount = risk_per_trade / stop_dist
-            shares = max(1, int(amount / multiplier))
+            # 判断 stop_loss 是价格还是距离
+            # 如果 stop_loss > price * 0.5，认为是价格；否则是距离
+            if signal.stop_loss > 0:
+                if signal.stop_loss > signal.price * 0.5:
+                    # stop_loss 是价格
+                    stop_dist = abs(signal.price - signal.stop_loss)
+                else:
+                    # stop_loss 是距离
+                    stop_dist = signal.stop_loss
+            else:
+                stop_dist = signal.price * 0.02
+            # 根据风险计算手数
+            if stop_dist > 0:
+                shares = max(1, int(risk_per_trade / (stop_dist * multiplier)))
+            else:
+                shares = 1
 
             # 保证金检查
             required_margin = signal.price * multiplier * shares * margin_rate

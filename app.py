@@ -110,10 +110,12 @@ def load_data_from_db(symbol: str, start_date: str, end_date: str) -> pd.DataFra
     return df
 
 
-def render_strategy_params(strategy_class) -> dict:
+def render_strategy_params(strategy_class, loaded_params=None, config_key="") -> dict:
     """动态渲染策略参数"""
     params = {}
     param_defs = strategy_class.get_params()
+    loaded_params = loaded_params or {}
+    # config_key 用于在切换配置时重置 widget 状态
 
     # 按类型分组参数
     grouped_params = {
@@ -143,32 +145,35 @@ def render_strategy_params(strategy_class) -> dict:
             for i, p in enumerate(group_params):
                 with cols[i % 3]:
                     if p.param_type == 'int':
+                        default_val = int(loaded_params.get(p.name, p.default))
                         params[p.name] = st.number_input(
                             p.label,
                             min_value=int(p.min_val) if p.min_val else 1,
                             max_value=int(p.max_val) if p.max_val else 100,
-                            value=int(p.default),
+                            value=default_val,
                             step=int(p.step) if p.step else 1,
                             help=p.description,
-                            key=f"param_{p.name}"
+                            key=f"param_{p.name}_{config_key}"
                         )
                     elif p.param_type == 'float':
+                        default_val = float(loaded_params.get(p.name, p.default))
                         params[p.name] = st.number_input(
                             p.label,
                             min_value=float(p.min_val) if p.min_val else 0.0,
                             max_value=float(p.max_val) if p.max_val else 100.0,
-                            value=float(p.default),
+                            value=default_val,
                             step=float(p.step) if p.step else 0.01,
                             format="%.2f",
                             help=p.description,
-                            key=f"param_{p.name}"
+                            key=f"param_{p.name}_{config_key}"
                         )
                     elif p.param_type == 'bool':
+                        default_val = bool(loaded_params.get(p.name, p.default))
                         params[p.name] = st.checkbox(
                             p.label,
-                            value=bool(p.default),
+                            value=default_val,
                             help=p.description,
-                            key=f"param_{p.name}"
+                            key=f"param_{p.name}_{config_key}"
                         )
 
     return params
@@ -273,126 +278,112 @@ def render_data_management():
 
 
 def render_backtest_page():
-    """渲染回测页面"""
-    st.header("📊 策略回测")
+    """渲染回测页面 - 左右并排布局"""
 
-    # 左右布局
-    col_config, col_result = st.columns([1, 2])
+    # ========== 加载配置和策略 ==========
+    configs = list_configs()
+    config_options = ["手动配置"] + configs
 
-    with col_config:
-        st.subheader("⚙️ 回测配置")
+    strategies = get_all_strategies()
+    strategy_names = list(strategies.keys())
+    strategy_display = {k: v.display_name for k, v in strategies.items()}
+    default_idx = strategy_names.index('brother2v6') if 'brother2v6' in strategy_names else 0
 
-        # ========== 配置文件管理 ==========
-        st.markdown('<div class="config-section">', unsafe_allow_html=True)
-        st.markdown('<div class="config-header">📁 配置文件</div>', unsafe_allow_html=True)
+    df_status = get_data_status()
+    symbols_with_data = df_status[df_status['record_count'] > 0]['symbol'].tolist()
 
-        configs = list_configs()
-        config_options = ["手动配置"] + configs
+    if not symbols_with_data:
+        st.warning("没有数据，请先在「数据管理」页面下载数据")
+        return None
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            selected_config = st.selectbox(
-                "选择配置",
-                options=config_options,
-                label_visibility="collapsed"
-            )
-        with col2:
+    # ========== 三列布局：基础设置 | 策略参数 | 合约信息 ==========
+    col_settings, col_params, col_info = st.columns([1, 1.5, 0.8])
+
+    # ========== 左列：基础设置 ==========
+    with col_settings:
+        st.subheader("⚙️ 基础设置")
+
+        # 配置文件选择 - 检测变化时清除旧状态
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            selected_config = st.selectbox("📁 配置文件", options=config_options, key="config_select")
+
+        # 检测配置是否变化
+        if 'last_config' not in st.session_state:
+            st.session_state.last_config = selected_config
+        if st.session_state.last_config != selected_config:
+            # 配置变化，清除所有参数相关的 session_state
+            keys_to_delete = [k for k in st.session_state.keys() if k.startswith('param_')]
+            for k in keys_to_delete:
+                del st.session_state[k]
+            st.session_state.last_config = selected_config
+            st.rerun()
+
+        with c2:
+            st.write("")  # 占位
             if selected_config != "手动配置":
-                if st.button("🗑️", help="删除配置"):
+                if st.button("🗑️", key="del_config"):
                     delete_config(selected_config)
                     st.rerun()
 
-        # 如果选择了配置文件，加载它
-        loaded_params = None
+        # 加载配置文件内容
+        loaded_params = {}
+        loaded_strategy = None
+        loaded_symbol = None
+        loaded_timeframe = None
+        loaded_capital = 1000000
+
         if selected_config != "手动配置":
             config = load_config(selected_config)
             loaded_params = config.get('run_policy', {}).get('params', {})
-            st.success(f"已加载: {selected_config}")
+            loaded_strategy = config.get('run_policy', {}).get('name', None)
+            loaded_timeframe = config.get('run_policy', {}).get('timeframes', None)
+            loaded_capital = config.get('initial_capital', 1000000)
+            pairs = config.get('pairs', [])
+            if pairs:
+                loaded_symbol = pairs[0]
 
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # ========== 策略选择 ==========
-        strategies = get_all_strategies()
-        strategy_names = list(strategies.keys())
-        strategy_display = {k: v.display_name for k, v in strategies.items()}
-
-        # 默认选择 brother2v6
-        default_idx = strategy_names.index('brother2v6') if 'brother2v6' in strategy_names else 0
+        # 策略选择
+        strategy_idx = default_idx
+        if loaded_strategy and loaded_strategy in strategy_names:
+            strategy_idx = strategy_names.index(loaded_strategy)
 
         selected_strategy_name = st.selectbox(
             "🎯 选择策略",
             options=strategy_names,
-            index=default_idx,
-            format_func=lambda x: f"{strategy_display[x]} ({x})"
+            index=strategy_idx,
+            format_func=lambda x: f"{strategy_display[x]}"
         )
-
         strategy_class = strategies[selected_strategy_name]
 
-        # 显示策略信息
-        with st.expander("📖 策略说明", expanded=False):
-            st.markdown(f"**{strategy_class.display_name}**")
-            st.markdown(f"*版本: {strategy_class.version}*")
-            st.markdown(strategy_class.description)
-
-        st.markdown("---")
-
-        # ========== 品种选择 ==========
-        st.write("**📌 品种选择**")
-
-        df_status = get_data_status()
-        symbols_with_data = df_status[df_status['record_count'] > 0]['symbol'].tolist()
-
-        if not symbols_with_data:
-            st.warning("没有数据，请先在「数据管理」页面下载数据")
-            return None
+        # 品种选择
+        symbol_idx = 0
+        if loaded_symbol and loaded_symbol in symbols_with_data:
+            symbol_idx = symbols_with_data.index(loaded_symbol)
 
         symbol = st.selectbox(
-            "选择品种",
+            "📌 选择品种",
             options=symbols_with_data,
+            index=symbol_idx,
             format_func=lambda x: f"{x} - {FUTURES_SYMBOLS.get(x, ('未知',))[0]}"
         )
 
+        # 时间周期
+        timeframe_options = ["日线", "周线", "月线", "60分钟", "30分钟", "15分钟", "5分钟"]
+        timeframe_idx = 0
+        if loaded_timeframe and loaded_timeframe in timeframe_options:
+            timeframe_idx = timeframe_options.index(loaded_timeframe)
+
+        time_period = st.selectbox(
+            "⏱️ K线周期",
+            options=timeframe_options,
+            index=timeframe_idx
+        )
+
+        # 回测时间
         symbol_info = df_status[df_status['symbol'] == symbol].iloc[0]
         data_start = symbol_info['start_date']
         data_end = symbol_info['end_date']
-
-        st.caption(f"数据范围: {data_start} ~ {data_end}")
-
-        # 显示合约规格
-        inst = get_instrument(symbol)
-        if inst:
-            with st.expander("📋 合约规格", expanded=True):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("合约乘数", f"{inst['multiplier']}")
-                    st.metric("最小变动", f"{inst['price_tick']}")
-                with col2:
-                    st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
-                    if inst['commission_fixed'] > 0:
-                        st.metric("手续费", f"{inst['commission_fixed']}元/手")
-                    else:
-                        st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
-
-                # 合约价值示例
-                st.caption(f"💡 若价格10000，1手合约价值 = 10000 × {inst['multiplier']} = {10000 * inst['multiplier']:,}元")
-                st.caption(f"💡 1手保证金约 = {10000 * inst['multiplier'] * inst['margin_rate']:,.0f}元")
-
-        st.markdown("---")
-
-        # ========== 时间周期 ==========
-        st.write("**⏱️ 时间周期**")
-        time_period = st.selectbox(
-            "K线周期",
-            options=["日线", "周线", "月线", "60分钟", "30分钟", "15分钟", "5分钟"],
-            index=0
-        )
-
-        st.markdown("---")
-
-        # ========== 回测时间范围 ==========
-        st.write("**📅 回测时间范围**")
-
-        col_start, col_end = st.columns(2)
 
         try:
             min_date = datetime.strptime(data_start, '%Y-%m-%d').date()
@@ -401,75 +392,82 @@ def render_backtest_page():
             min_date = datetime(2010, 1, 1).date()
             max_date = datetime.now().date()
 
-        with col_start:
-            start_date = st.date_input("起始日期", value=min_date, min_value=min_date, max_value=max_date)
+        c1, c2 = st.columns(2)
+        with c1:
+            start_date = st.date_input("📅 起始", value=min_date, min_value=min_date, max_value=max_date)
+        with c2:
+            end_date = st.date_input("📅 结束", value=max_date, min_value=min_date, max_value=max_date)
 
-        with col_end:
-            end_date = st.date_input("结束日期", value=max_date, min_value=min_date, max_value=max_date)
-
-        st.markdown("---")
-
-        # ========== 资金设置 ==========
-        st.write("**💰 资金设置**")
+        # 资金设置
         initial_capital = st.number_input(
-            "初始资金 (元)",
+            "💰 初始资金",
             min_value=100000,
             max_value=100000000,
-            value=1000000,
+            value=int(loaded_capital),
             step=100000
         )
 
+        # 开始回测按钮
         st.markdown("---")
+        run_backtest_btn = st.button("🚀 开始回测", type="primary", use_container_width=True)
 
-        # ========== 策略参数 ==========
-        st.write("**🔧 策略参数**")
-
-        # 如果有加载的参数，应用它们
-        if loaded_params:
-            for p in strategy_class.get_params():
-                if p.name in loaded_params:
-                    st.session_state[f"param_{p.name}"] = loaded_params[p.name]
-
-        params = render_strategy_params(strategy_class)
-
-        st.markdown("---")
-
-        # ========== 保存配置 ==========
-        with st.expander("💾 保存配置", expanded=False):
-            save_name = st.text_input("配置名称", value=f"{selected_strategy_name}_{symbol}")
-            if st.button("保存当前配置"):
-                config = {
+        # 保存配置
+        with st.expander("💾 保存配置"):
+            save_name = st.text_input("名称", value=f"{selected_strategy_name}_{symbol}")
+            if st.button("保存"):
+                cfg = {
                     'name': save_name,
                     'initial_capital': initial_capital,
                     'time_start': start_date.strftime('%Y%m%d'),
                     'time_end': end_date.strftime('%Y%m%d'),
-                    'run_policy': {
-                        'name': selected_strategy_name,
-                        'timeframes': time_period,
-                        'params': params
-                    },
+                    'run_policy': {'name': selected_strategy_name, 'timeframes': time_period, 'params': params},
                     'pairs': [symbol]
                 }
-                save_config(f"{save_name}.yml", config)
-                st.success(f"已保存: {save_name}.yml")
+                save_config(f"{save_name}.yml", cfg)
+                st.success(f"已保存!")
 
+    # ========== 中列：策略参数 ==========
+    with col_params:
+        st.subheader(f"🔧 {strategy_class.display_name} 参数")
+        params = render_strategy_params(strategy_class, loaded_params, selected_config)
+
+    # ========== 右列：合约信息 ==========
+    with col_info:
+        st.subheader("📋 合约规格")
+
+        inst = get_instrument(symbol)
+        if inst:
+            st.metric("品种", f"{inst['name']}")
+            st.metric("合约乘数", f"{inst['multiplier']}")
+            st.metric("最小变动", f"{inst['price_tick']}")
+            st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
+            if inst['commission_fixed'] > 0:
+                st.metric("手续费", f"{inst['commission_fixed']}元/手")
+            else:
+                st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
+            st.metric("交易所", inst['exchange'])
+
+            st.markdown("---")
+            st.caption(f"💡 1手价值 ≈ 价格×{inst['multiplier']}")
+
+        # 数据信息
         st.markdown("---")
+        st.write("**📊 数据范围**")
+        st.caption(f"{data_start} ~ {data_end}")
+        st.caption(f"共 {symbol_info['record_count']:,} 条")
 
-        # ========== 开始回测按钮 ==========
-        run_backtest_btn = st.button("🚀 开始回测", type="primary", use_container_width=True)
+    st.markdown("---")
 
-        return {
-            'symbol': symbol,
-            'strategy_class': strategy_class,
-            'params': params,
-            'initial_capital': initial_capital,
-            'start_date': start_date.strftime('%Y-%m-%d'),
-            'end_date': end_date.strftime('%Y-%m-%d'),
-            'time_period': time_period,
-            'run_backtest': run_backtest_btn
-        }
-
-    return None
+    return {
+        'symbol': symbol,
+        'strategy_class': strategy_class,
+        'params': params,
+        'initial_capital': initial_capital,
+        'start_date': start_date.strftime('%Y-%m-%d'),
+        'end_date': end_date.strftime('%Y-%m-%d'),
+        'time_period': time_period,
+        'run_backtest': run_backtest_btn
+    }
 
 
 def run_backtest_and_display(config, result_container):

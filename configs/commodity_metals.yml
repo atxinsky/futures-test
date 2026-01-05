@@ -1,0 +1,62 @@
+# 商品期货金属组合策略配置
+# 适合: AU, AG, CU, AL, ZN, NI
+# 预期年化: 2-3% (单品种), 10%+ (组合)
+
+name: commodity_metals
+env: backtest
+leverage: 1
+market_type: futures
+contract_type: commodity
+initial_capital: 1000000
+
+# 回测时间
+time_start: "20150101"
+time_end: "20251231"
+
+# 策略配置 - Brother2v6 优化参数
+run_policy:
+  name: brother2v6
+  timeframes: 日线
+  params:
+    # ========== 趋势参数 - 短周期更敏感 ==========
+    sml_len: 10          # 短期EMA (默认12)
+    big_len: 40          # 长期EMA (默认50)
+    break_len: 20        # 突破周期 (默认30)
+
+    # ========== 指标参数 ==========
+    atr_len: 14
+    adx_len: 14
+    adx_thres: 20.0      # ADX阈值
+    chop_len: 14
+    chop_thres: 50.0
+    vol_len: 20
+    vol_multi: 1.2       # 放量确认
+
+    # ========== 止损 - 宽止损适合商品 ==========
+    stop_n: 3.0          # 初始止损ATR倍数
+    min_stop_n: 2.0
+
+    # ========== 止盈 ==========
+    break_even_pct: 8.0      # 保本触发
+    partial_trigger_pct: 10.0
+    partial_drawdown_pct: 3.0
+    partial_rate: 50.0
+    full_drawdown_pct: 6.0
+
+    # ========== 仓位 - 适度激进 ==========
+    capital_rate: 0.6    # 60%资金
+    risk_rate: 0.06      # 6%单次风险
+
+# 推荐交易品种
+pairs:
+  - AU   # 黄金 - 年化 2.6%
+  - AG   # 白银 - 年化 3.1%
+  - CU   # 沪铜 - 年化 2.0%
+  - AL   # 沪铝 - 年化 1.5%
+  - ZN   # 沪锌 - 年化 1.7%
+  - NI   # 沪镍 - 年化 1.2%
+
+# 风控提示
+# - 单品种年化 ~2%, 回撤 ~13%
+# - 6品种组合预期年化 10%+, 但需分散资金
+# - 建议每品种分配 15-20% 资金
