@@ -293,17 +293,29 @@ def render_backtest_config():
         )
         strategy_class = strategies[selected_strategy_name]
 
-        # 品种选择
-        symbol_idx = 0
-        if loaded_symbol and loaded_symbol in symbols_with_data:
-            symbol_idx = symbols_with_data.index(loaded_symbol)
+        # 品种选择（支持多选）
+        default_symbols = []
+        if loaded_symbol:
+            if isinstance(loaded_symbol, list):
+                default_symbols = [s for s in loaded_symbol if s in symbols_with_data]
+            elif loaded_symbol in symbols_with_data:
+                default_symbols = [loaded_symbol]
+        if not default_symbols and symbols_with_data:
+            default_symbols = [symbols_with_data[0]]
 
-        symbol = st.selectbox(
-            "选择品种",
+        symbols = st.multiselect(
+            "选择品种（可多选）",
             options=symbols_with_data,
-            index=symbol_idx,
+            default=default_symbols,
             format_func=lambda x: f"{x} - {FUTURES_SYMBOLS.get(x, ('未知',))[0]}"
         )
+
+        if not symbols:
+            st.warning("请至少选择一个品种")
+            return None
+
+        # 显示第一个品种的信息（用于右侧合约规格显示）
+        symbol = symbols[0]
 
         # 时间周期
         timeframe_options = ["日线", "周线", "月线", "60分钟", "30分钟", "15分钟", "5分钟"]
@@ -317,17 +329,29 @@ def render_backtest_config():
             index=timeframe_idx
         )
 
-        # 回测时间
+        # 回测时间 - 计算所有选中品种的数据范围交集
+        min_dates = []
+        max_dates = []
+        for sym in symbols:
+            sym_info = df_status[df_status['symbol'] == sym]
+            if not sym_info.empty:
+                try:
+                    min_dates.append(datetime.strptime(sym_info.iloc[0]['start_date'], '%Y-%m-%d').date())
+                    max_dates.append(datetime.strptime(sym_info.iloc[0]['end_date'], '%Y-%m-%d').date())
+                except:
+                    pass
+
+        if min_dates and max_dates:
+            min_date = max(min_dates)  # 取最晚的开始日期
+            max_date = min(max_dates)  # 取最早的结束日期
+        else:
+            min_date = datetime(2010, 1, 1).date()
+            max_date = datetime.now().date()
+
+        # 获取第一个品种的信息用于显示
         symbol_info = df_status[df_status['symbol'] == symbol].iloc[0]
         data_start = symbol_info['start_date']
         data_end = symbol_info['end_date']
-
-        try:
-            min_date = datetime.strptime(data_start, '%Y-%m-%d').date()
-            max_date = datetime.strptime(data_end, '%Y-%m-%d').date()
-        except:
-            min_date = datetime(2010, 1, 1).date()
-            max_date = datetime.now().date()
 
         c1, c2 = st.columns(2)
         with c1:
@@ -350,7 +374,8 @@ def render_backtest_config():
 
         # 保存配置
         with st.expander("保存配置"):
-            save_name = st.text_input("名称", value=f"{selected_strategy_name}_{symbol}")
+            symbols_str = '_'.join(symbols[:3]) + ('_etc' if len(symbols) > 3 else '')
+            save_name = st.text_input("名称", value=f"{selected_strategy_name}_{symbols_str}")
             if st.button("保存"):
                 cfg = {
                     'name': save_name,
@@ -358,7 +383,7 @@ def render_backtest_config():
                     'time_start': start_date.strftime('%Y%m%d'),
                     'time_end': end_date.strftime('%Y%m%d'),
                     'run_policy': {'name': selected_strategy_name, 'timeframes': time_period, 'params': params},
-                    'pairs': [symbol]
+                    'pairs': symbols
                 }
                 save_config(f"{save_name}.yml", cfg)
                 st.success(f"已保存!")
@@ -371,6 +396,10 @@ def render_backtest_config():
     # ========== 右列：合约信息 ==========
     with col_info:
         st.subheader("合约规格")
+
+        # 显示选中的品种数量
+        if len(symbols) > 1:
+            st.info(f"已选 {len(symbols)} 个品种")
 
         inst = get_instrument(symbol)
         if inst:
@@ -390,13 +419,23 @@ def render_backtest_config():
         # 数据信息
         st.markdown("---")
         st.write("**数据范围**")
-        st.caption(f"{data_start} ~ {data_end}")
-        st.caption(f"共 {symbol_info['record_count']:,} 条")
+        if len(symbols) == 1:
+            st.caption(f"{data_start} ~ {data_end}")
+            st.caption(f"共 {symbol_info['record_count']:,} 条")
+        else:
+            st.caption(f"公共范围: {min_date} ~ {max_date}")
+            # 列出所有品种
+            with st.expander("选中品种列表"):
+                for sym in symbols:
+                    sym_info = df_status[df_status['symbol'] == sym]
+                    if not sym_info.empty:
+                        st.caption(f"{sym}: {sym_info.iloc[0]['record_count']:,}条")
 
     st.markdown("---")
 
     return {
-        'symbol': symbol,
+        'symbols': symbols,  # 返回品种列表
+        'symbol': symbol,    # 保留单品种兼容性
         'strategy_class': strategy_class,
         'params': params,
         'initial_capital': initial_capital,
@@ -408,39 +447,71 @@ def render_backtest_config():
 
 
 def run_backtest_and_display(config, result_container):
-    """运行回测并显示结果"""
+    """运行回测并显示结果（支持多品种）"""
     with result_container:
-        with st.spinner(f"正在使用 {config['strategy_class'].display_name} 策略回测..."):
+        symbols = config.get('symbols', [config['symbol']])
+        total_symbols = len(symbols)
+
+        with st.spinner(f"正在使用 {config['strategy_class'].display_name} 策略回测 {total_symbols} 个品种..."):
             try:
                 time_period = config['time_period']
+                all_results = []
+                all_df_data = {}
 
-                if time_period in ["5分钟", "15分钟", "30分钟", "60分钟"]:
-                    period_map = {"5分钟": "5", "15分钟": "15", "30分钟": "30", "60分钟": "60"}
-                    period = period_map[time_period]
-                    df_data = load_minute_from_database(
-                        config['symbol'], period, config['start_date'], config['end_date']
-                    )
-                    if len(df_data) == 0:
-                        st.error(f"没有 {time_period} 数据，请先下载分钟数据")
-                        return
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for idx, symbol in enumerate(symbols):
+                    status_text.text(f"回测 {symbol} ({idx+1}/{total_symbols})...")
+                    progress_bar.progress((idx + 1) / total_symbols)
+
+                    if time_period in ["5分钟", "15分钟", "30分钟", "60分钟"]:
+                        period_map = {"5分钟": "5", "15分钟": "15", "30分钟": "30", "60分钟": "60"}
+                        period = period_map[time_period]
+                        df_data = load_minute_from_database(
+                            symbol, period, config['start_date'], config['end_date']
+                        )
+                        if len(df_data) == 0:
+                            st.warning(f"{symbol}: 没有 {time_period} 数据，跳过")
+                            continue
+                    else:
+                        df_data = load_from_database(symbol, config['start_date'], config['end_date'])
+                        if len(df_data) == 0:
+                            st.warning(f"{symbol}: 没有数据，跳过")
+                            continue
+                        df_data = resample_data(df_data, time_period)
+
+                    strategy_instance = config['strategy_class'](config['params'])
+                    result = run_backtest_with_strategy(df_data, symbol, strategy_instance, config['initial_capital'])
+                    all_results.append(result)
+                    all_df_data[symbol] = df_data
+
+                progress_bar.empty()
+                status_text.empty()
+
+                if not all_results:
+                    st.error("所有品种都没有数据，无法回测")
+                    return
+
+                # 存储结果
+                if len(all_results) == 1:
+                    # 单品种模式
+                    st.session_state['backtest_result'] = all_results[0]
+                    st.session_state['backtest_df_data'] = list(all_df_data.values())[0]
+                    st.session_state['backtest_multi_results'] = None
                 else:
-                    df_data = load_from_database(config['symbol'], config['start_date'], config['end_date'])
-                    if len(df_data) == 0:
-                        st.error("没有数据，请先下载数据")
-                        return
-                    df_data = resample_data(df_data, time_period)
+                    # 多品种模式 - 存储第一个结果作为默认显示，同时存储所有结果
+                    st.session_state['backtest_result'] = all_results[0]
+                    st.session_state['backtest_df_data'] = list(all_df_data.values())[0]
+                    st.session_state['backtest_multi_results'] = all_results
+                    st.session_state['backtest_multi_df_data'] = all_df_data
 
-                st.info(f"数据: {len(df_data)} 条 ({config['start_date']} ~ {config['end_date']}) - {config['time_period']}")
-
-                strategy_instance = config['strategy_class'](config['params'])
-                result = run_backtest_with_strategy(df_data, config['symbol'], strategy_instance, config['initial_capital'])
-
-                st.session_state['backtest_result'] = result
-                st.session_state['backtest_df_data'] = df_data
                 st.session_state['backtest_params'] = config['params']
                 st.session_state['backtest_strategy_class'] = config['strategy_class']
 
-                st.success(f"回测完成! 共 {len(result.trades)} 笔交易")
+                total_trades = sum(len(r.trades) for r in all_results)
+                total_pnl = sum(r.total_pnl for r in all_results)
+                st.success(f"回测完成! {len(all_results)} 个品种, 共 {total_trades} 笔交易, 总收益 ¥{total_pnl:,.0f}")
 
             except Exception as e:
                 st.error(f"回测失败: {e}")

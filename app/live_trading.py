@@ -140,14 +140,21 @@ def render_trading_config():
         )
         strategy_class = strategies[selected_strategy_name]
 
-        # 品种选择
-        symbol = st.selectbox(
-            "选择品种",
+        # 品种选择（支持多选）
+        symbols = st.multiselect(
+            "选择品种（可多选）",
             options=list(INSTRUMENTS.keys()),
+            default=['RB'],
             format_func=lambda x: f"{x} - {INSTRUMENTS.get(x, {}).get('name', x)}",
             disabled=is_running,
-            key="live_symbol"
+            key="live_symbols"
         )
+
+        if not symbols:
+            st.warning("请至少选择一个品种")
+
+        # 用于显示的第一个品种
+        symbol = symbols[0] if symbols else 'RB'
 
         # 时间周期
         timeframe_options = ["日线", "60分钟", "30分钟", "15分钟", "5分钟"]
@@ -178,6 +185,14 @@ def render_trading_config():
     with col_info:
         st.subheader("合约规格")
 
+        # 显示选中的品种数量
+        if len(symbols) > 1:
+            st.info(f"已选 {len(symbols)} 个品种")
+            with st.expander("选中品种"):
+                for sym in symbols:
+                    inst_info = get_instrument(sym)
+                    st.caption(f"{sym}: {inst_info['name'] if inst_info else sym}")
+
         inst = get_instrument(symbol)
         if inst:
             st.metric("品种", f"{inst['name']}")
@@ -194,10 +209,11 @@ def render_trading_config():
     st.markdown("---")
 
     if not is_running:
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            if st.button("启动实盘交易", type="primary", use_container_width=True):
-                start_live_trading(selected_strategy_name, symbol, time_period, initial_capital, params)
+        if symbols:
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                if st.button("启动实盘交易", type="primary", use_container_width=True):
+                    start_live_trading(selected_strategy_name, symbols, time_period, initial_capital, params)
     else:
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
@@ -469,8 +485,8 @@ def render_live_orders():
         st.info("今日无成交")
 
 
-def start_live_trading(strategy_name: str, symbol: str, timeframe: str, capital: float, params: dict):
-    """启动实盘交易"""
+def start_live_trading(strategy_name: str, symbols: list, timeframe: str, capital: float, params: dict):
+    """启动实盘交易（支持多品种）"""
     try:
         from core.live_engine import LiveEngine
         from strategies.base import create_strategy
@@ -480,6 +496,10 @@ def start_live_trading(strategy_name: str, symbol: str, timeframe: str, capital:
         if not config.get('tq_user') or not config.get('tq_password'):
             st.error("请先在「系统设置」中配置天勤账号")
             return
+
+        # 兼容单品种传入
+        if isinstance(symbols, str):
+            symbols = [symbols]
 
         # 实盘模式检查
         sim_mode = config.get('sim_mode', True)
@@ -491,10 +511,11 @@ def start_live_trading(strategy_name: str, symbol: str, timeframe: str, capital:
         # 创建引擎
         engine = LiveEngine()
 
-        # 设置品种配置
-        inst = get_instrument(symbol)
-        if inst:
-            engine.set_instrument_config(symbol, inst)
+        # 设置所有品种配置
+        for symbol in symbols:
+            inst = get_instrument(symbol)
+            if inst:
+                engine.set_instrument_config(symbol, inst)
 
         # 初始化网关
         gateway_type = "tq_sim" if sim_mode else "tq_live"
@@ -511,7 +532,7 @@ def start_live_trading(strategy_name: str, symbol: str, timeframe: str, capital:
         # 创建策略
         strategy = create_strategy(strategy_name, params)
         if strategy:
-            engine.add_strategy(strategy, [symbol])
+            engine.add_strategy(strategy, symbols)  # 传入所有品种
 
         # 设置信号回调
         def on_signal(signal, sym, sid):
