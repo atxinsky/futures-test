@@ -76,6 +76,10 @@ class LiveEngine:
         self.last_bars: Dict[str, BarData] = {}
         self.last_ticks: Dict[str, TickData] = {}
 
+        # ============ 网关配置 ============
+        self.gateway_type: str = ""
+        self.gateway_config: dict = {}
+
         # ============ 品种配置 ============
         self.instrument_configs: Dict[str, dict] = {}
 
@@ -110,7 +114,8 @@ class LiveEngine:
                 sim模式: {initial_capital, slippage, ...}
                 tq模式: {tq_user, tq_password, sim_mode, broker_id, td_account, td_password, ...}
         """
-        gateway_config = gateway_config or {}
+        self.gateway_type = gateway_type
+        self.gateway_config = gateway_config or {}
 
         if gateway_type == "sim":
             self.gateway = SimGateway(self.event_engine)
@@ -120,9 +125,9 @@ class LiveEngine:
             self.gateway = TqGateway(self.event_engine)
             # 设置模式
             if gateway_type == "tq_live":
-                gateway_config['sim_mode'] = False
+                self.gateway_config['sim_mode'] = False
             else:
-                gateway_config['sim_mode'] = True
+                self.gateway_config['sim_mode'] = True
         else:
             raise ValueError(f"未知网关类型: {gateway_type}，支持: sim, tq, tq_sim, tq_live")
 
@@ -315,8 +320,14 @@ class LiveEngine:
         # 启动事件引擎
         self.event_engine.start()
 
-        # 连接网关
-        self.gateway.connect()
+        # 连接网关（传递配置）
+        if self.gateway_type in ["tq", "tq_sim", "tq_live"]:
+            # TqGateway需要config参数
+            self.gateway_config['initial_capital'] = initial_capital
+            self.gateway.connect(self.gateway_config)
+        else:
+            # SimGateway不需要参数
+            self.gateway.connect()
 
         # 订阅所有策略的品种
         subscribed = set()

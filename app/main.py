@@ -48,6 +48,69 @@ try:
 except ImportError:
     HAS_SIM_TRADING = False
 
+import json
+
+# TqSdk配置文件路径
+TQ_CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tq_config.json")
+
+
+def load_tq_config_for_settings() -> dict:
+    """加载TqSdk配置（用于系统设置）"""
+    if os.path.exists(TQ_CONFIG_FILE):
+        try:
+            with open(TQ_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {
+        'tq_user': '',
+        'tq_password': '',
+        'sim_mode': True,
+        'broker_id': '',
+        'td_account': '',
+        'td_password': '',
+        'default_symbols': ['RB', 'AU', 'IF'],
+        'initial_capital': 100000,
+        'risk_config': {
+            'max_position_per_symbol': 10,
+            'max_daily_loss': 0.05,
+            'max_drawdown': 0.15
+        }
+    }
+
+
+def save_tq_config_for_settings(config: dict):
+    """保存TqSdk配置（用于系统设置）"""
+    with open(TQ_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def test_tq_connection_settings(tq_user: str, tq_password: str):
+    """测试天勤连接"""
+    if not tq_user or not tq_password:
+        st.error("请输入天勤账号和密码")
+        return
+
+    try:
+        from tqsdk import TqApi, TqAuth
+
+        with st.spinner("正在连接天勤..."):
+            auth = TqAuth(tq_user, tq_password)
+            api = TqApi(auth=auth)
+
+            # 获取行情测试
+            quote = api.get_quote("SHFE.rb2505")
+            api.wait_update()
+
+            api.close()
+
+        st.success(f"连接成功! 测试行情: RB2505 最新价 {quote.last_price}")
+
+    except ImportError:
+        st.error("TqSdk未安装，请执行: pip install tqsdk")
+    except Exception as e:
+        st.error(f"连接失败: {e}")
+
 
 # ============ 回测辅助函数 ============
 
@@ -1684,30 +1747,103 @@ def render_settings():
             st.button("保存品种配置")
 
     with tab3:
-        st.subheader("网关设置")
+        st.subheader("TqSdk连接设置")
 
-        gateway_type = st.selectbox("网关类型", ["模拟盘", "CTP实盘"])
+        # 加载配置
+        tq_config = load_tq_config_for_settings()
 
-        if gateway_type == "模拟盘":
-            st.info("模拟盘模式，无需配置网关连接信息")
-            st.number_input("模拟滑点(跳)", value=1, min_value=0)
-            st.number_input("模拟延迟(ms)", value=100, min_value=0)
+        col1, col2 = st.columns(2)
 
-        else:
-            st.write("**CTP连接配置**")
-            st.text_input("交易前置地址", placeholder="tcp://180.168.146.187:10130")
-            st.text_input("行情前置地址", placeholder="tcp://180.168.146.187:10131")
-            st.text_input("Broker ID", placeholder="9999")
-            st.text_input("用户名")
-            st.text_input("密码", type="password")
-            st.text_input("AppID")
-            st.text_input("AuthCode")
+        with col1:
+            st.write("**天勤账号**")
+            tq_user = st.text_input("天勤用户名", value=tq_config.get('tq_user', ''), key="settings_tq_user")
+            tq_password = st.text_input("天勤密码", type="password", value=tq_config.get('tq_password', ''), key="settings_tq_password")
 
-            if st.button("测试连接"):
-                with st.spinner("连接中..."):
-                    import time
-                    time.sleep(2)
-                st.success("连接成功!")
+            st.markdown("---")
+
+            st.write("**交易模式**")
+            sim_mode = st.radio(
+                "选择模式",
+                options=["模拟盘 (TqSim)", "实盘 (需要期货账号)"],
+                index=0 if tq_config.get('sim_mode', True) else 1,
+                horizontal=True,
+                key="settings_sim_mode"
+            )
+            sim_mode_bool = sim_mode == "模拟盘 (TqSim)"
+
+        with col2:
+            st.write("**期货账号配置**")
+            if not sim_mode_bool:
+                broker_id = st.text_input("期货公司代码", value=tq_config.get('broker_id', ''), key="settings_broker_id")
+                td_account = st.text_input("交易账号", value=tq_config.get('td_account', ''), key="settings_td_account")
+                td_password = st.text_input("交易密码", type="password", value=tq_config.get('td_password', ''), key="settings_td_password")
+                st.info("实盘交易需要开通期货账户")
+            else:
+                st.info("模拟盘模式使用TqSim，无需期货账号，使用真实行情数据进行模拟撮合")
+                broker_id = tq_config.get('broker_id', '')
+                td_account = tq_config.get('td_account', '')
+                td_password = tq_config.get('td_password', '')
+
+        st.markdown("---")
+
+        # 风控设置
+        st.write("**风控设置**")
+        risk_config = tq_config.get('risk_config', {})
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            max_pos = st.number_input(
+                "单品种最大持仓",
+                min_value=1, max_value=100,
+                value=risk_config.get('max_position_per_symbol', 10),
+                key="settings_max_pos"
+            )
+
+        with col2:
+            max_daily_loss = st.slider(
+                "日最大亏损%",
+                min_value=1, max_value=20,
+                value=int(risk_config.get('max_daily_loss', 0.05) * 100),
+                key="settings_max_daily_loss"
+            )
+
+        with col3:
+            max_drawdown = st.slider(
+                "最大回撤%",
+                min_value=5, max_value=50,
+                value=int(risk_config.get('max_drawdown', 0.15) * 100),
+                key="settings_max_drawdown"
+            )
+
+        st.markdown("---")
+
+        # 保存和测试按钮
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        with col1:
+            if st.button("保存配置", type="primary", use_container_width=True, key="save_tq_config"):
+                new_config = {
+                    'tq_user': tq_user,
+                    'tq_password': tq_password,
+                    'sim_mode': sim_mode_bool,
+                    'broker_id': broker_id,
+                    'td_account': td_account,
+                    'td_password': td_password,
+                    'default_symbols': tq_config.get('default_symbols', ['RB', 'AU', 'IF']),
+                    'initial_capital': tq_config.get('initial_capital', 100000),
+                    'risk_config': {
+                        'max_position_per_symbol': max_pos,
+                        'max_daily_loss': max_daily_loss / 100,
+                        'max_drawdown': max_drawdown / 100
+                    }
+                }
+                save_tq_config_for_settings(new_config)
+                st.success("配置已保存!")
+
+        with col2:
+            if st.button("测试连接", use_container_width=True, key="test_tq_conn"):
+                test_tq_connection_settings(tq_user, tq_password)
 
     with tab4:
         st.subheader("数据管理")

@@ -67,8 +67,8 @@ def render_sim_trading_page():
         st.error("TqSdk未安装，请执行: `pip install tqsdk`")
         return
 
-    # 选项卡
-    tab1, tab2, tab3, tab4 = st.tabs(["交易配置", "持仓监控", "订单记录", "连接设置"])
+    # 选项卡（连接设置已移到系统设置）
+    tab1, tab2, tab3 = st.tabs(["交易配置", "持仓监控", "订单记录"])
 
     with tab1:
         render_trading_config()
@@ -78,9 +78,6 @@ def render_sim_trading_page():
 
     with tab3:
         render_sim_orders()
-
-    with tab4:
-        render_sim_settings()
 
 
 def render_trading_config():
@@ -144,21 +141,6 @@ def render_trading_config():
             disabled=is_running
         )
 
-        st.markdown("---")
-
-        # 启动/停止按钮
-        if not is_running:
-            if st.button("启动模拟交易", type="primary", use_container_width=True):
-                start_sim_trading(selected_strategy_name, symbol, time_period, initial_capital, params)
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("停止交易", use_container_width=True):
-                    stop_sim_trading()
-            with col2:
-                if st.button("刷新状态", use_container_width=True):
-                    st.rerun()
-
     # ========== 中列：策略参数 ==========
     with col_params:
         st.subheader(f"{strategy_class.display_name} 参数")
@@ -179,6 +161,21 @@ def render_trading_config():
             else:
                 st.metric("手续费率", f"{inst.get('commission_rate', 0)*10000:.2f}%%")
             st.metric("交易所", inst.get('exchange', '-'))
+
+    # ========== 启动/停止按钮（在三列之后）==========
+    st.markdown("---")
+
+    if not is_running:
+        if st.button("启动模拟交易", type="primary", use_container_width=True):
+            start_sim_trading(selected_strategy_name, symbol, time_period, initial_capital, params)
+    else:
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("停止交易", use_container_width=True):
+                stop_sim_trading()
+        with col2:
+            if st.button("刷新状态", use_container_width=True):
+                st.rerun()
 
 
 def render_strategy_params(strategy_class, disabled: bool = False) -> dict:
@@ -440,35 +437,6 @@ def render_sim_orders():
         st.info("今日无成交")
 
 
-def render_sim_settings():
-    """渲染连接设置"""
-    st.subheader("TqSdk连接设置")
-
-    config = load_tq_config()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        tq_user = st.text_input("天勤用户名", value=config.get('tq_user', ''))
-        tq_password = st.text_input("天勤密码", type="password", value=config.get('tq_password', ''))
-
-    with col2:
-        st.write("**模拟盘设置**")
-        st.info("模拟交易使用TqSim，无需期货账号，使用真实行情数据进行模拟撮合")
-
-    st.markdown("---")
-
-    if st.button("保存设置", type="primary"):
-        config['tq_user'] = tq_user
-        config['tq_password'] = tq_password
-        save_tq_config(config)
-        st.success("设置已保存!")
-
-    # 测试连接
-    if st.button("测试连接"):
-        test_connection(tq_user, tq_password)
-
-
 def start_sim_trading(strategy_name: str, symbol: str, timeframe: str, capital: float, params: dict):
     """启动模拟交易"""
     try:
@@ -478,7 +446,7 @@ def start_sim_trading(strategy_name: str, symbol: str, timeframe: str, capital: 
         config = load_tq_config()
 
         if not config.get('tq_user') or not config.get('tq_password'):
-            st.error("请先在「连接设置」中配置天勤账号")
+            st.error("请先在「系统设置」中配置天勤账号")
             return
 
         # 创建引擎
@@ -596,25 +564,3 @@ def cancel_all_orders():
         st.success(f"已撤销 {len(orders)} 个订单")
     except Exception as e:
         st.error(f"撤单失败: {e}")
-
-
-def test_connection(tq_user: str, tq_password: str):
-    """测试天勤连接"""
-    if not tq_user or not tq_password:
-        st.error("请输入天勤账号和密码")
-        return
-
-    try:
-        from tqsdk import TqApi, TqAuth
-
-        with st.spinner("正在连接天勤..."):
-            auth = TqAuth(tq_user, tq_password)
-            api = TqApi(auth=auth)
-            quote = api.get_quote("SHFE.rb2505")
-            api.wait_update()
-            api.close()
-
-        st.success(f"连接成功! 测试: RB2505 最新价 {quote.last_price}")
-
-    except Exception as e:
-        st.error(f"连接失败: {e}")
