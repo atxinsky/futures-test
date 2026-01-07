@@ -5,30 +5,38 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: futures-backtest-futures:v2.0
     container_name: futures-backtest
     ports:
       - "8502:8502"
     volumes:
       # 数据持久化
       - ./data:/app/data
-      # 策略文件
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      # 策略文件（热更新）
       - ./strategies:/app/strategies
-      # 配置文件
-      - ./configs:/app/configs
-      # 主程序文件 (热更新)
-      - ./app.py:/app/app.py
-      - ./config_manager.py:/app/config_manager.py
-      - ./engine.py:/app/engine.py
+      # 核心模块（热更新）
+      - ./core:/app/core
+      - ./gateway:/app/gateway
+      - ./trading:/app/trading
+      - ./models:/app/models
+      - ./utils:/app/utils
+      # Web界面（热更新）
+      - ./app:/app/app
+      # 配置文件（热更新）
       - ./config.py:/app/config.py
-      - ./data_manager.py:/app/data_manager.py
+      - ./system_config.py:/app/system_config.py
     environment:
       - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s
 
 volumes:
   futures-data:

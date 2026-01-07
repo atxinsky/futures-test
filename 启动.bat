@@ -61,7 +61,7 @@ echo ✅ 正在启动 Streamlit...
 echo 📊 访问地址: http://localhost:8502
 echo.
 start "" http://localhost:8502
-streamlit run app.py --server.port 8502
+streamlit run app/main.py --server.port 8502
 
 :end
 pause
