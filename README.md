@@ -1,21 +1,33 @@
-# Futures Backtest System
+# Futures Quantitative Trading System v2.0
 
-专业的中国期货市场策略回测平台，支持70+期货品种。
+专业的中国期货市场量化交易系统，支持回测与模拟盘交易。
 
 ## Features
 
-- **Multi-Variety Support**: 股指期货、国债期货、贵金属、有色金属、黑色系、能化、农产品等
-- **Multiple Strategies**: 内置多种经过验证的交易策略
-- **Data Management**: 一键下载历史数据，SQLite数据库存储
-- **Professional Metrics**: 夏普比率、索提诺比率、卡尔玛比率、最大回撤等
-- **Visualization**: K线图、资金曲线、月度热力图、交易记录
+### Core Features
+- **Backtesting**: 专业回测引擎，支持70+期货品种
+- **Simulation Trading**: 模拟盘实时交易
+- **Risk Management**: 完整风控体系（持仓限制、日亏限制、最大回撤）
+- **Professional Web UI**: 基于Streamlit的专业交易界面
+
+### Trading Components
+- **Event Engine**: 事件驱动架构
+- **Order Manager**: 订单管理与状态跟踪
+- **Position Manager**: 持仓管理与盈亏计算
+- **Risk Manager**: 风险控制与合规检查
+- **Account Manager**: 账户资金与绩效统计
+
+### Data Support
+- **TianQin Integration**: 天勤数据接口
+- **Local Database**: SQLite本地存储
+- **Multi-Period**: 支持1m/5m/15m/1h/1d等多周期
 
 ## Quick Start
 
 ### Docker (Recommended)
 
 ```bash
-# Start
+# Build and start
 docker-compose up -d --build
 
 # View logs
@@ -33,18 +45,66 @@ Access: http://localhost:8502
 # Install dependencies
 pip install -r requirements.txt
 
-# Run
-streamlit run app.py --server.port 8502
+# Start Web UI
+python run.py web
+
+# Run backtest (CLI)
+python run.py backtest -s RB -p 1d --start 2024-01-01 --end 2024-12-31
+
+# Start simulation trading
+python run.py sim -s RB -c 100000
 ```
+
+Port: http://localhost:8504
 
 ### Windows
 
-Double-click `启动.bat`
+Double-click `start_web.bat`
+
+## Architecture
+
+```
+futures-backtest/
+├── app/                    # Web界面
+│   └── main.py            # Streamlit主程序
+├── core/                   # 核心引擎
+│   ├── event_engine.py    # 事件引擎
+│   ├── backtest_engine.py # 回测引擎
+│   ├── live_engine.py     # 实盘/模拟盘引擎
+│   └── scheduler.py       # 任务调度器
+├── gateway/                # 网关接口
+│   ├── base_gateway.py    # 网关基类
+│   └── sim_gateway.py     # 模拟盘网关
+├── trading/                # 交易管理
+│   ├── order_manager.py   # 订单管理
+│   ├── position_manager.py# 持仓管理
+│   ├── risk_manager.py    # 风控管理
+│   └── account_manager.py # 账户管理
+├── strategies/             # 策略模块
+│   ├── base.py            # 策略基类
+│   ├── wavetrend_final.py # WaveTrend策略
+│   ├── emanew_v5.py       # EmaNew V5策略
+│   ├── macdema_v3.py      # MACD+EMA V3策略
+│   └── ...                # 更多策略
+├── models/                 # 数据模型
+│   └── base.py            # 基础数据类
+├── utils/                  # 工具模块
+│   └── data_loader.py     # 数据加载器
+├── data/                   # 数据存储
+├── logs/                   # 日志目录
+├── config.py              # 品种配置
+├── system_config.py       # 系统配置
+├── run.py                 # CLI启动脚本
+├── Dockerfile
+└── docker-compose.yml
+```
 
 ## Built-in Strategies
 
-### EmaNew V5 (分批止盈)
+### WaveTrend Final
+基于WaveTrend指标的趋势策略，支持日线/小时线。
 
+### EmaNew V5 (分批止盈)
 解决"卖飞焦虑"的分批止盈策略。
 
 **Entry Signal:**
@@ -62,27 +122,22 @@ Double-click `启动.bat`
 | 保本止损 | 盈利超10%后跌回入场价 |
 
 ### MACD+EMA V3 (追踪止盈)
-
 一次性止盈版本，追踪止损保护利润。
 
-**Entry Signal:**
-- EMA(9) 金叉 EMA(21)
-- MACD柱状图 > 0 且动量增强
-- 收盘价 > MA(20)
+### Brother2 V6
+趋势突破策略，参考Banbot BigBrother架构。
 
-**Exit Rules (by priority):**
-1. 信号K线止损：连续N天收盘<金叉K线最低价
-2. 固定止损：亏损≥8%
-3. 追踪止盈：盈利≥18%后，从高点回撤10%
-4. 保本止损：盈利≥10%后跌回入场价
-5. 技术信号：EMA死叉 + 跌破MA20
+## Web UI Pages
 
-### Other Strategies
-
-- **Dual MA**: 双均线交叉策略
-- **Bollinger**: 布林带突破策略
-- **Turtle**: 海龟交易策略
-- **Brother2V5**: 趋势突破策略
+| Page | Description |
+|------|-------------|
+| 仪表盘 | 账户概览、持仓盈亏、风控状态 |
+| 策略管理 | 策略列表、启停控制、参数配置 |
+| 持仓监控 | 实时持仓、盈亏跟踪 |
+| 订单管理 | 订单记录、状态查询 |
+| 风控中心 | 风控指标、限制配置 |
+| 回测系统 | 策略回测、参数优化 |
+| 系统设置 | 系统配置、日志查看 |
 
 ## Supported Futures
 
@@ -96,31 +151,32 @@ Double-click `启动.bat`
 | Energy & Chemicals | SC(原油), FU(燃油), TA(PTA), MA(甲醇), PP, L, V |
 | Agricultural | M(豆粕), Y(豆油), C(玉米), CF(棉花), SR(白糖) |
 
-## Project Structure
+## Risk Management
 
-```
-futures-backtest/
-├── app.py                 # Streamlit web application
-├── config.py              # Futures variety configuration
-├── engine.py              # Backtest engine
-├── data_manager.py        # Data download & storage
-├── strategies/            # Strategy modules
-│   ├── __init__.py        # Strategy auto-discovery
-│   ├── base.py            # BaseStrategy abstract class
-│   ├── emanew_v5.py       # EmaNew V5 strategy
-│   ├── macdema_v3.py      # MACD+EMA V3 strategy
-│   ├── dual_ma.py         # Dual MA strategy
-│   ├── bollinger.py       # Bollinger band strategy
-│   └── turtle.py          # Turtle trading strategy
-├── data/                  # SQLite database storage
-├── Dockerfile
-├── docker-compose.yml
-└── requirements.txt
+### Risk Controls
+| Control | Description | Default |
+|---------|-------------|---------|
+| max_position_per_symbol | 单品种最大持仓 | 10 |
+| max_position_total | 总持仓上限 | 50 |
+| max_margin_ratio | 最大保证金占用 | 80% |
+| max_daily_loss_ratio | 日亏损限制 | 5% |
+| max_drawdown_ratio | 最大回撤限制 | 15% |
+| default_stop_loss | 默认止损比例 | 3% |
+
+## CLI Commands
+
+```bash
+# Start Web UI
+python run.py web
+
+# Run backtest
+python run.py backtest -s RB -p 1d --start 2024-01-01 --end 2024-12-31 -c 100000
+
+# Start simulation
+python run.py sim -s RB -c 100000
 ```
 
 ## Custom Strategy
-
-Extend `BaseStrategy` to create your own strategy:
 
 ```python
 from strategies.base import BaseStrategy, StrategyParam, Signal
@@ -135,7 +191,6 @@ class MyStrategy(BaseStrategy):
     def get_params(cls):
         return [
             StrategyParam("period", "Period", 20, 5, 50, 1, "int"),
-            StrategyParam("threshold", "Threshold", 0.02, 0.01, 0.10, 0.01, "float"),
         ]
 
     def calculate_indicators(self, df):
@@ -145,92 +200,66 @@ class MyStrategy(BaseStrategy):
     def on_bar(self, idx, df, capital):
         row = df.iloc[idx]
 
-        # Entry logic
+        # Entry
         if self.position == 0 and row['close'] > row['ma']:
             self.position = 1
             self.entry_price = row['close']
             return Signal("buy", row['close'], tag="ma_breakout")
 
-        # Exit logic
+        # Exit
         if self.position == 1:
             profit = (row['close'] - self.entry_price) / self.entry_price
-            if profit >= self.params['threshold']:
+            if profit >= 0.05:
                 self.position = 0
                 return Signal("close", row['close'], tag="take_profit")
 
         return None
 ```
 
-## Configuration
+## Docker Configuration
 
-### Docker Environment Variables
+### Volumes
+| Volume | Description |
+|--------|-------------|
+| ./data | 数据持久化 |
+| ./logs | 日志文件 |
+| ./strategies | 策略文件（热更新） |
+| ./core | 核心模块（热更新） |
+| ./app | Web界面（热更新） |
 
+### Environment Variables
 | Variable | Description | Default |
 |----------|-------------|---------|
-| TZ | Timezone | Asia/Shanghai |
-| DATA_DIR | Data directory | /app/data |
-
-### Streamlit Config
-
-Edit `.streamlit/config.toml`:
-
-```toml
-[server]
-port = 8502
-headless = true
-
-[theme]
-primaryColor = "#667eea"
-```
-
-## API
-
-### Strategy Discovery
-
-```python
-from strategies import get_all_strategies, list_strategies
-
-# Get all strategy classes
-strategies = get_all_strategies()
-
-# Get strategy info list
-info = list_strategies()
-```
-
-### Run Backtest
-
-```python
-from engine import run_backtest_with_strategy
-from strategies import get_strategy
-
-# Get strategy class
-StrategyClass = get_strategy("emanew_v5")
-
-# Run backtest
-results = run_backtest_with_strategy(
-    df=price_data,
-    strategy_class=StrategyClass,
-    params={
-        "ema_fast": 9,
-        "ema_slow": 21,
-        "stop_loss": 0.08
-    },
-    initial_capital=1000000,
-    contract_multiplier=300,
-    commission_rate=0.000023
-)
-```
+| TZ | 时区 | Asia/Shanghai |
+| PYTHONUNBUFFERED | Python输出缓冲 | 1 |
 
 ## Performance Metrics
 
 | Metric | Description |
 |--------|-------------|
-| Sharpe Ratio | Risk-adjusted return |
-| Sortino Ratio | Downside risk-adjusted return |
-| Calmar Ratio | Return / Max Drawdown |
-| Max Drawdown | Maximum peak-to-trough decline |
-| Win Rate | Percentage of winning trades |
-| Profit Factor | Gross profit / Gross loss |
+| Total Return | 总收益率 |
+| Annual Return | 年化收益率 |
+| Sharpe Ratio | 夏普比率 |
+| Sortino Ratio | 索提诺比率 |
+| Calmar Ratio | 卡尔玛比率 |
+| Max Drawdown | 最大回撤 |
+| Win Rate | 胜率 |
+| Profit Factor | 盈亏比 |
+
+## Changelog
+
+### v2.0 (2026-01-07)
+- Added live/simulation trading support
+- New event-driven architecture
+- Added risk management system
+- Professional Web UI with multiple pages
+- Order/Position/Account management
+- Task scheduler for automated trading
+
+### v1.0
+- Initial backtest system
+- Basic Web UI
+- Multiple strategies
 
 ## License
 

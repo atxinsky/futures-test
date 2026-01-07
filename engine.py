@@ -77,7 +77,7 @@ def run_backtest_with_strategy(
     initial_capital: float = 1000000,
 ) -> BacktestResult:
     """
-    使用策略类运行回测
+    使用策略类运行回测（支持多空双向交易）
 
     df: 包含OHLCV数据的DataFrame
     symbol: 品种代码
@@ -99,6 +99,7 @@ def run_backtest_with_strategy(
     trades = []
     trade_id = 0
     shares = 0
+    last_direction = 0  # 记录上一次开仓方向
 
     capital = initial_capital
     equity_curve = []
@@ -142,10 +143,10 @@ def run_backtest_with_strategy(
         if signal is None:
             continue
 
-        # 处理平仓信号
+        # 处理平仓信号（多空通用）
         if signal.action == "close" and strategy.position == 0:
-            # 策略已重置position
-            pnl = (signal.price - strategy.entry_price) * shares * multiplier
+            # 策略已重置position，计算盈亏（方向由last_direction决定）
+            pnl = (signal.price - strategy.entry_price) * shares * multiplier * last_direction
             comm = calculate_commission(symbol, signal.price, shares) * 2
             net_pnl = pnl - comm
             capital += net_pnl
@@ -156,15 +157,15 @@ def run_backtest_with_strategy(
             else:
                 holding_days = 0
 
-            pnl_pct = (signal.price - strategy.entry_price) / strategy.entry_price * 100 if strategy.entry_price > 0 else 0
+            pnl_pct = (signal.price - strategy.entry_price) / strategy.entry_price * 100 * last_direction if strategy.entry_price > 0 else 0
 
             trade = Trade(
                 trade_id=trade_id,
                 symbol=symbol,
-                direction=1,
+                direction=last_direction,
                 entry_time=strategy.entry_time if strategy.entry_time else current_time,
                 entry_price=strategy.entry_price,
-                entry_tag="long",
+                entry_tag="long" if last_direction == 1 else "short",
                 volume=shares,
                 exit_time=current_time,
                 exit_price=signal.price,
@@ -178,23 +179,21 @@ def run_backtest_with_strategy(
             trades.append(trade)
             trade_id += 1
             shares = 0
+            last_direction = 0
             # 重置entry_price用于下次记录
             strategy.entry_price = 0
             strategy.entry_time = None
 
-        # 处理开仓信号
+        # 处理开多信号
         elif signal.action == "buy" and strategy.position == 1:
             # 计算合理仓位（考虑品种乘数）
             stake_amt = capital * strategy.params.get('capital_rate', 1.0)
             risk_per_trade = stake_amt * strategy.params.get('risk_rate', 0.02)
             # 判断 stop_loss 是价格还是距离
-            # 如果 stop_loss > price * 0.5，认为是价格；否则是距离
             if signal.stop_loss > 0:
                 if signal.stop_loss > signal.price * 0.5:
-                    # stop_loss 是价格
                     stop_dist = abs(signal.price - signal.stop_loss)
                 else:
-                    # stop_loss 是距离
                     stop_dist = signal.stop_loss
             else:
                 stop_dist = signal.price * 0.02
@@ -211,6 +210,35 @@ def run_backtest_with_strategy(
                 shares = max(1, int(max_margin / (signal.price * multiplier * margin_rate)))
 
             strategy.entry_time = current_time
+            last_direction = 1  # 记录多头方向
+
+        # 处理开空信号
+        elif signal.action == "sell" and strategy.position == -1:
+            # 计算合理仓位（考虑品种乘数）
+            stake_amt = capital * strategy.params.get('capital_rate', 1.0)
+            risk_per_trade = stake_amt * strategy.params.get('risk_rate', 0.02)
+            # 判断 stop_loss 是价格还是距离
+            if signal.stop_loss > 0:
+                if signal.stop_loss > signal.price * 0.5:
+                    stop_dist = abs(signal.stop_loss - signal.price)
+                else:
+                    stop_dist = signal.stop_loss
+            else:
+                stop_dist = signal.price * 0.02
+            # 根据风险计算手数
+            if stop_dist > 0:
+                shares = max(1, int(risk_per_trade / (stop_dist * multiplier)))
+            else:
+                shares = 1
+
+            # 保证金检查
+            required_margin = signal.price * multiplier * shares * margin_rate
+            max_margin = capital * 0.8
+            if required_margin > max_margin:
+                shares = max(1, int(max_margin / (signal.price * multiplier * margin_rate)))
+
+            strategy.entry_time = current_time
+            last_direction = -1  # 记录空头方向
 
     # 平掉最后持仓
     if strategy.position != 0 and shares > 0:
@@ -230,7 +258,7 @@ def run_backtest_with_strategy(
             direction=strategy.position,
             entry_time=strategy.entry_time if strategy.entry_time else current_time,
             entry_price=strategy.entry_price,
-            entry_tag="long",
+            entry_tag="long" if strategy.position == 1 else "short",
             volume=shares,
             exit_time=current_time,
             exit_price=curr_close,

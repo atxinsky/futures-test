@@ -3,10 +3,22 @@ __pycache__
 *.pyo
 .git
 .gitignore
-*.md
-*.bat
 .env
+*.log
+
+# 数据文件（体积大）
 data/*.db
 data/*.csv
-*.log
-.streamlit/secrets.toml
+data/*.parquet
+cache/
+logs/
+backup/
+
+# 开发文件
+*.bat
+.vscode/
+.idea/
+tests/
+
+# 备份
+*_backup_*
