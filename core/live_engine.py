@@ -21,6 +21,11 @@ from models.base import (
 from core.event_engine import EventEngine
 from gateway.base_gateway import BaseGateway
 from gateway.sim_gateway import SimGateway
+try:
+    from gateway.tq_gateway import TqGateway
+    HAS_TQSDK = True
+except ImportError:
+    HAS_TQSDK = False
 from trading.order_manager import OrderManager
 from trading.position_manager import PositionManager
 from trading.risk_manager import RiskManager, RiskConfig
@@ -100,17 +105,26 @@ class LiveEngine:
         初始化网关
 
         Args:
-            gateway_type: 网关类型 (sim/ctp/...)
+            gateway_type: 网关类型 (sim/tq/tq_sim/tq_live)
             gateway_config: 网关配置
+                sim模式: {initial_capital, slippage, ...}
+                tq模式: {tq_user, tq_password, sim_mode, broker_id, td_account, td_password, ...}
         """
         gateway_config = gateway_config or {}
 
         if gateway_type == "sim":
-            self.gateway = SimGateway(self.event_engine, gateway_config)
-        # elif gateway_type == "ctp":
-        #     self.gateway = CtpGateway(self.event_engine, gateway_config)
+            self.gateway = SimGateway(self.event_engine)
+        elif gateway_type in ["tq", "tq_sim", "tq_live"]:
+            if not HAS_TQSDK:
+                raise RuntimeError("TqSdk未安装，请执行: pip install tqsdk")
+            self.gateway = TqGateway(self.event_engine)
+            # 设置模式
+            if gateway_type == "tq_live":
+                gateway_config['sim_mode'] = False
+            else:
+                gateway_config['sim_mode'] = True
         else:
-            raise ValueError(f"未知网关类型: {gateway_type}")
+            raise ValueError(f"未知网关类型: {gateway_type}，支持: sim, tq, tq_sim, tq_live")
 
         # 初始化交易组件
         self.order_manager = OrderManager(self.event_engine, self.gateway)

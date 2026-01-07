@@ -1,42 +1,107 @@
-name: futures-backtest
+name: futures-trading
 
 services:
-  futures-backtest:
+  # Web界面 (端口8504)
+  web:
     build:
       context: .
       dockerfile: Dockerfile
-    image: futures-backtest-futures:v2.0
-    container_name: futures-backtest
+    image: futures-trading:v2.0
+    container_name: futures-web
     ports:
-      - "8502:8502"
+      - "8504:8504"
     volumes:
-      # 数据持久化
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./cache:/app/cache
-      # 策略文件（热更新）
       - ./strategies:/app/strategies
-      # 核心模块（热更新）
       - ./core:/app/core
       - ./gateway:/app/gateway
       - ./trading:/app/trading
       - ./models:/app/models
-      - ./utils:/app/utils
-      # Web界面（热更新）
       - ./app:/app/app
-      # 配置文件（热更新）
       - ./config.py:/app/config.py
-      - ./system_config.py:/app/system_config.py
+      - ./tq_config.json:/app/tq_config.json
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
+    command: ["streamlit", "run", "app/main.py", "--server.port=8504", "--server.address=0.0.0.0", "--server.headless=true"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8504/_stcore/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+
+  # TqSdk模拟盘交易服务 (7x24运行)
+  trading:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: futures-trading:v2.0
+    container_name: futures-trading
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./strategies:/app/strategies
+      - ./core:/app/core
+      - ./gateway:/app/gateway
+      - ./trading:/app/trading
+      - ./models:/app/models
+      - ./config.py:/app/config.py
+      - ./tq_config.json:/app/tq_config.json
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - TQ_USER=tretra
+      - TQ_PASSWORD=LOVE*101512
+      - SIM_MODE=true
+      - SYMBOLS=RB,AU,IF,IC
+      - STRATEGY=brother2v6
+      - INITIAL_CAPITAL=100000
+    command: ["python", "run_docker.py"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # 合体版: Web + 模拟盘交易 (推荐)
+  full:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: futures-trading:v2.0
+    container_name: futures-full
+    ports:
+      - "8504:8504"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./strategies:/app/strategies
+      - ./core:/app/core
+      - ./gateway:/app/gateway
+      - ./trading:/app/trading
+      - ./models:/app/models
+      - ./app:/app/app
+      - ./config.py:/app/config.py
+      - ./tq_config.json:/app/tq_config.json
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - TQ_USER=tretra
+      - TQ_PASSWORD=LOVE*101512
+      - SIM_MODE=true
+      - SYMBOLS=RB,AU,IF,IC
+      - STRATEGY=brother2v6
+      - INITIAL_CAPITAL=100000
+    command: ["python", "run_docker.py", "--web", "--web-port", "8504"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   futures-data:

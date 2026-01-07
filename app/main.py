@@ -34,6 +34,20 @@ from config_manager import (
     get_strategy_param_groups, STRATEGY_DEFAULTS, DEFAULT_CONFIG
 )
 
+# 实盘交易模块
+try:
+    from app.live_trading import render_live_trading_page
+    HAS_LIVE_TRADING = True
+except ImportError:
+    HAS_LIVE_TRADING = False
+
+# 模拟交易模块
+try:
+    from app.sim_trading import render_sim_trading_page
+    HAS_SIM_TRADING = True
+except ImportError:
+    HAS_SIM_TRADING = False
+
 
 # ============ 回测辅助函数 ============
 
@@ -944,7 +958,7 @@ st.set_page_config(
 # 自定义CSS
 st.markdown("""
 <style>
-    /* 主题色 */
+    /* 主题色 - 使用深色文字 */
     :root {
         --primary-color: #1f77b4;
         --success-color: #2ecc71;
@@ -952,32 +966,37 @@ st.markdown("""
         --warning-color: #f39c12;
         --bg-dark: #1e1e1e;
         --bg-card: #2d2d2d;
-        --text-primary: #ffffff;
-        --text-secondary: #b0b0b0;
+        --text-primary: #000000;
+        --text-secondary: #333333;
     }
 
     /* 隐藏默认菜单 */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
+    /* 全局文字颜色 */
+    .stMarkdown, .stText, p, span, label, div {
+        color: #000000 !important;
+    }
+
     /* 卡片样式 */
     .metric-card {
-        background: linear-gradient(135deg, #2d2d2d 0%, #1e1e1e 100%);
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
         border-radius: 10px;
         padding: 20px;
-        border: 1px solid #3d3d3d;
+        border: 1px solid #dee2e6;
         margin-bottom: 10px;
     }
 
     .metric-value {
         font-size: 28px;
         font-weight: bold;
-        color: #ffffff;
+        color: #000000;
     }
 
     .metric-label {
         font-size: 14px;
-        color: #b0b0b0;
+        color: #000000;
         margin-bottom: 5px;
     }
 
@@ -993,33 +1012,63 @@ st.markdown("""
 
     /* 状态指示器 */
     .status-running {
-        color: #2ecc71;
+        color: #2ecc71 !important;
         font-weight: bold;
     }
 
     .status-stopped {
-        color: #e74c3c;
+        color: #e74c3c !important;
         font-weight: bold;
     }
 
     /* 表格样式优化 */
     .dataframe {
         font-size: 13px !important;
+        color: #000000 !important;
     }
 
-    /* 侧边栏 */
-    .css-1d391kg {
-        background-color: #1e1e1e;
+    /* 侧边栏文字 */
+    [data-testid="stSidebar"] * {
+        color: #000000 !important;
     }
 
     /* 标题 */
     h1 {
-        color: #ffffff !important;
+        color: #000000 !important;
         font-weight: 600 !important;
     }
 
     h2, h3 {
-        color: #e0e0e0 !important;
+        color: #000000 !important;
+    }
+
+    /* 标签和说明文字 */
+    .stSelectbox label, .stMultiSelect label, .stNumberInput label,
+    .stDateInput label, .stTextInput label, .stCheckbox label {
+        color: #000000 !important;
+    }
+
+    /* Expander 标题 */
+    .streamlit-expanderHeader {
+        color: #000000 !important;
+    }
+
+    /* Tab 标签 */
+    .stTabs [data-baseweb="tab"] {
+        color: #000000 !important;
+    }
+
+    /* Metric 组件 */
+    [data-testid="stMetricLabel"] {
+        color: #000000 !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #000000 !important;
+    }
+
+    /* Caption 说明文字 */
+    .stCaption {
+        color: #333333 !important;
     }
 
     /* 按钮 */
@@ -1068,10 +1117,10 @@ def main():
         st.title("📈 期货量化系统")
         st.markdown("---")
 
-        # 导航
+        # 导航 - 6个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "策略管理", "持仓监控", "订单管理", "风控中心", "回测系统", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1101,15 +1150,19 @@ def main():
         st.markdown("---")
         st.caption(f"更新时间: {datetime.now().strftime('%H:%M:%S')}")
 
-    # 主内容区
+    # 主内容区 - 6个页面
     if page == "仪表盘":
         render_dashboard()
-    elif page == "策略管理":
-        render_strategy_management()
-    elif page == "持仓监控":
-        render_position_monitor()
-    elif page == "订单管理":
-        render_order_management()
+    elif page == "模拟交易":
+        if HAS_SIM_TRADING:
+            render_sim_trading_page()
+        else:
+            st.error("模拟交易模块未加载，请检查依赖")
+    elif page == "实盘交易":
+        if HAS_LIVE_TRADING:
+            render_live_trading_page()
+        else:
+            st.error("实盘交易模块未加载，请检查依赖")
     elif page == "风控中心":
         render_risk_center()
     elif page == "回测系统":
@@ -1119,85 +1172,92 @@ def main():
 
 
 def render_dashboard():
-    """渲染仪表盘"""
-    st.title("交易仪表盘")
+    """渲染仪表盘 - 系统概览"""
+    st.title("系统概览")
 
-    # 顶部指标
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # 获取引擎状态
+    sim_engine = st.session_state.get('sim_engine')
+    live_engine = st.session_state.get('live_engine')
+
+    sim_running = sim_engine is not None and sim_engine.is_running if sim_engine else False
+    live_running = live_engine is not None and live_engine.is_running if live_engine else False
+
+    # 系统状态卡片
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("账户权益", "¥125,680", "+5,680 (4.73%)")
+        st.subheader("模拟交易")
+        if sim_running:
+            st.success("运行中")
+            account = sim_engine.get_account()
+            if account:
+                st.metric("账户权益", f"¥{account.balance:,.0f}")
+                st.metric("持仓数量", f"{len(sim_engine.get_positions())}")
+        else:
+            st.info("未启动")
+            st.caption("前往「模拟交易」页面启动")
+
     with col2:
-        st.metric("可用资金", "¥98,450", "78.3%")
+        st.subheader("实盘交易")
+        if live_running:
+            st.success("运行中")
+            account = live_engine.get_account()
+            if account:
+                st.metric("账户权益", f"¥{account.balance:,.0f}")
+                st.metric("持仓数量", f"{len(live_engine.get_positions())}")
+        else:
+            st.warning("未启动")
+            st.caption("前往「实盘交易」页面启动")
+
     with col3:
-        st.metric("今日盈亏", "¥2,350", "+1.90%")
+        st.subheader("系统信息")
+        st.metric("已配置策略", f"{len(get_all_strategies())}")
+        st.metric("已配置品种", f"{len(INSTRUMENTS)}")
+
+    st.markdown("---")
+
+    # 快速操作
+    st.subheader("快速入口")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.markdown("**模拟交易**")
+        st.caption("使用真实行情数据进行策略验证")
+        if st.button("进入模拟交易", use_container_width=True):
+            st.session_state.nav_page = "模拟交易"
+            st.rerun()
+
+    with col2:
+        st.markdown("**策略回测**")
+        st.caption("历史数据回测，评估策略表现")
+        if st.button("进入回测系统", use_container_width=True):
+            st.session_state.nav_page = "回测系统"
+            st.rerun()
+
+    with col3:
+        st.markdown("**风控中心**")
+        st.caption("设置风控规则，监控交易风险")
+        if st.button("进入风控中心", use_container_width=True):
+            st.session_state.nav_page = "风控中心"
+            st.rerun()
+
     with col4:
-        st.metric("持仓数量", "3", "")
-    with col5:
-        st.metric("活动订单", "2", "")
+        st.markdown("**系统设置**")
+        st.caption("配置天勤账号、品种参数等")
+        if st.button("进入系统设置", use_container_width=True):
+            st.session_state.nav_page = "系统设置"
+            st.rerun()
 
     st.markdown("---")
 
-    # 权益曲线和持仓分布
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader("权益曲线")
-
-        # 模拟数据
-        dates = pd.date_range(start='2025-01-01', periods=30, freq='D')
-        equity = 100000 + np.cumsum(np.random.randn(30) * 1000)
-
-        chart_data = pd.DataFrame({
-            '日期': dates,
-            '权益': equity
-        }).set_index('日期')
-
-        st.line_chart(chart_data, height=300)
-
-    with col2:
-        st.subheader("持仓分布")
-
-        # 持仓分布饼图数据
-        position_data = pd.DataFrame({
-            '品种': ['螺纹钢', '铁矿石', '黄金'],
-            '占比': [40, 35, 25]
-        })
-
-        st.bar_chart(position_data.set_index('品种'), height=300)
-
-    st.markdown("---")
-
-    # 持仓列表和最新交易
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("当前持仓")
-
-        positions_df = pd.DataFrame({
-            '合约': ['RB2505', 'I2505', 'AU2506'],
-            '方向': ['多', '多', '空'],
-            '数量': [5, 3, 2],
-            '开仓价': [3580, 820, 580],
-            '现价': [3620, 815, 575],
-            '浮盈': ['+2,000', '-150', '+100'],
-            '盈亏%': ['+1.12%', '-0.61%', '+0.86%']
-        })
-
-        st.dataframe(positions_df, hide_index=True, use_container_width=True)
-
-    with col2:
-        st.subheader("最新成交")
-
-        trades_df = pd.DataFrame({
-            '时间': ['14:35:20', '14:20:15', '11:30:00', '10:45:30'],
-            '合约': ['RB2505', 'I2505', 'AU2506', 'RB2505'],
-            '方向': ['买', '买', '卖', '买'],
-            '价格': [3580, 820, 580, 3570],
-            '数量': [2, 3, 2, 3]
-        })
-
-        st.dataframe(trades_df, hide_index=True, use_container_width=True)
+    # 使用说明
+    st.subheader("使用流程")
+    st.markdown("""
+    1. **回测验证** → 在「回测系统」中测试策略，确认参数
+    2. **模拟交易** → 在「模拟交易」中使用真实行情验证策略
+    3. **实盘上线** → 确认无误后，在「实盘交易」中启动真实交易
+    """)
 
 
 def render_strategy_management():

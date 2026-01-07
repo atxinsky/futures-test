@@ -1,9 +1,9 @@
 # 期货量化交易系统 v2.0
 FROM python:3.11-slim
 
-LABEL maintainer="atxinsky"
+LABEL maintainer="tretra"
 LABEL version="2.0"
-LABEL description="Futures Quantitative Trading System with Backtest & Live Trading"
+LABEL description="Futures Quantitative Trading System with TqSdk Live Trading"
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 # 复制依赖文件
 COPY requirements.txt .
 
-# 安装Python依赖
+# 安装Python依赖 (包含tqsdk)
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制应用代码
@@ -30,12 +30,16 @@ COPY . .
 # 创建必要目录
 RUN mkdir -p /app/data /app/logs /app/cache /app/backup
 
+# 设置时区
+ENV TZ=Asia/Shanghai
+ENV PYTHONUNBUFFERED=1
+
 # 暴露端口
-EXPOSE 8502
+EXPOSE 8504
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl --fail http://localhost:8502/_stcore/health || exit 1
+# 健康检查 (Web模式)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl --fail http://localhost:8504/_stcore/health || exit 1
 
-# 启动命令 - 使用新的 app/main.py
-CMD ["streamlit", "run", "app/main.py", "--server.port=8502", "--server.address=0.0.0.0", "--server.headless=true"]
+# 默认启动命令 - Web界面
+CMD ["streamlit", "run", "app/main.py", "--server.port=8504", "--server.address=0.0.0.0", "--server.headless=true"]
