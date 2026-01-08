@@ -48,5 +48,17 @@ Thumbs.db
 # Local config
 .env.local
 
+# Sensitive config files (contain credentials)
+tq_config.json
+*.credentials
+*.secret
+
+# State database
+data/state.db
+
 # Screenshots
 *.png
+
+# Temporary files
+nul
+*.tmp

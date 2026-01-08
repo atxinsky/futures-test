@@ -497,3 +497,72 @@ class OrderManager:
         with self._lock:
             if stop_id in self.stop_orders:
                 del self.stop_orders[stop_id]
+
+    # ========== 内存清理 ==========
+
+    def cleanup_history(self, keep_days: int = 7):
+        """
+        清理历史数据，防止内存无限增长
+
+        Args:
+            keep_days: 保留最近N天的数据
+        """
+        from datetime import timedelta
+        cutoff_time = datetime.now() - timedelta(days=keep_days)
+
+        with self._lock:
+            # 清理成交记录
+            old_trades_count = len(self.trades)
+            self.trades = [t for t in self.trades if t.trade_time >= cutoff_time]
+            trades_cleaned = old_trades_count - len(self.trades)
+
+            # 清理已完成订单
+            old_orders_count = len(self.orders)
+            orders_to_remove = []
+            for order_id, order in self.orders.items():
+                if order_id not in self.active_orders:
+                    if order.order_time and order.order_time < cutoff_time:
+                        orders_to_remove.append(order_id)
+
+            for order_id in orders_to_remove:
+                del self.orders[order_id]
+            orders_cleaned = len(orders_to_remove)
+
+            # 清理信号映射
+            old_signals_count = len(self.signal_orders)
+            signals_to_remove = []
+            for signal_id, order_ids in self.signal_orders.items():
+                # 如果关联的订单都已被清理，则移除信号映射
+                if all(oid not in self.orders for oid in order_ids):
+                    signals_to_remove.append(signal_id)
+
+            for signal_id in signals_to_remove:
+                del self.signal_orders[signal_id]
+            signals_cleaned = len(signals_to_remove)
+
+        if trades_cleaned > 0 or orders_cleaned > 0 or signals_cleaned > 0:
+            logger.info(f"内存清理: 成交-{trades_cleaned}, 订单-{orders_cleaned}, 信号映射-{signals_cleaned}")
+
+    def daily_cleanup(self):
+        """日终清理（建议每日收盘后调用）"""
+        self.cleanup_history(keep_days=7)
+
+        # 清理已触发的止损单
+        with self._lock:
+            triggered = [sid for sid, s in self.stop_orders.items() if s.triggered]
+            for stop_id in triggered:
+                del self.stop_orders[stop_id]
+
+            if triggered:
+                logger.info(f"清理已触发止损单: {len(triggered)}个")
+
+    def get_memory_usage(self) -> dict:
+        """获取内存使用统计"""
+        with self._lock:
+            return {
+                'orders': len(self.orders),
+                'active_orders': len(self.active_orders),
+                'trades': len(self.trades),
+                'signal_orders': len(self.signal_orders),
+                'stop_orders': len(self.stop_orders)
+            }

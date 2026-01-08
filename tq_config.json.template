@@ -1,0 +1,11 @@
+{
+    "tq_user": "YOUR_TIANQIN_USERNAME",
+    "tq_password": "YOUR_TIANQIN_PASSWORD",
+    "sim_mode": true,
+    "broker_id": "",
+    "td_account": "",
+    "td_password": "",
+    "symbols": ["RB", "AU", "IF"],
+    "strategy": "brother2v6",
+    "initial_capital": 100000
+}
