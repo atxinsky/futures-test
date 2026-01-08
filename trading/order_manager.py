@@ -32,6 +32,18 @@ def _get_trade_manager_class():
         TradeManager = TM
     return TradeManager
 
+# 订单号生成器
+OrderIdGenerator = None
+def _get_order_id_generator():
+    global OrderIdGenerator
+    if OrderIdGenerator is None:
+        try:
+            from utils.order_id import get_order_id_generator
+            OrderIdGenerator = get_order_id_generator()
+        except ImportError:
+            OrderIdGenerator = None
+    return OrderIdGenerator
+
 
 class StopOrder:
     """止损/止盈订单"""

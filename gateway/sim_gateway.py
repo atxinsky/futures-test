@@ -24,6 +24,18 @@ from gateway.base_gateway import BaseGateway
 
 logger = logging.getLogger(__name__)
 
+# 延迟导入订单号生成器
+_order_id_gen = None
+def _get_order_id_generator():
+    global _order_id_gen
+    if _order_id_gen is None:
+        try:
+            from utils.order_id import get_order_id_generator
+            _order_id_gen = get_order_id_generator()
+        except ImportError:
+            _order_id_gen = None
+    return _order_id_gen
+
 
 # 品种配置（简化版，实际应从config.py读取）
 DEFAULT_INSTRUMENT_CONFIG = {
@@ -123,8 +135,23 @@ class SimGateway(BaseGateway):
         product = ''.join([c for c in symbol if c.isalpha()]).upper()
         return self.instrument_configs.get(product, self.instrument_configs.get(symbol, DEFAULT_INSTRUMENT_CONFIG))
 
-    def _generate_order_id(self) -> str:
-        """生成订单ID"""
+    def _generate_order_id(self, strategy_name: str = "", signal_id: str = "") -> str:
+        """
+        生成订单ID
+
+        Args:
+            strategy_name: 策略名称（用于生成有意义的订单号）
+            signal_id: 关联的信号/交易ID
+
+        Returns:
+            订单号
+        """
+        gen = _get_order_id_generator()
+        if gen and strategy_name:
+            # 使用新的订单号生成器
+            return gen.generate(strategy_name, signal_id)
+
+        # 回退到原始方式
         with self._lock:
             self._order_count += 1
             return f"SIM_{datetime.now().strftime('%Y%m%d')}_{self._order_count:06d}"
@@ -141,7 +168,7 @@ class SimGateway(BaseGateway):
             self.on_error("模拟盘未连接")
             return ""
 
-        order_id = self._generate_order_id()
+        order_id = self._generate_order_id(request.strategy_name, request.signal_id)
 
         # 创建订单
         order = Order(

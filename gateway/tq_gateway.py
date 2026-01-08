@@ -26,6 +26,18 @@ from utils.rate_limiter import GatewayRateLimiter
 
 logger = logging.getLogger(__name__)
 
+# 延迟导入订单号生成器
+_order_id_gen = None
+def _get_order_id_generator():
+    global _order_id_gen
+    if _order_id_gen is None:
+        try:
+            from utils.order_id import get_order_id_generator
+            _order_id_gen = get_order_id_generator()
+        except ImportError:
+            _order_id_gen = None
+    return _order_id_gen
+
 # TqSdk映射
 EXCHANGE_MAP = {
     "CFFEX": "CFFEX",
@@ -382,8 +394,23 @@ class TqGateway(BaseGateway):
             'commission_rate': 0.0001,
         }))
 
-    def _generate_order_id(self) -> str:
-        """生成订单ID"""
+    def _generate_order_id(self, strategy_name: str = "", signal_id: str = "") -> str:
+        """
+        生成订单ID
+
+        Args:
+            strategy_name: 策略名称（用于生成有意义的订单号）
+            signal_id: 关联的信号/交易ID
+
+        Returns:
+            订单号
+        """
+        gen = _get_order_id_generator()
+        if gen and strategy_name:
+            # 使用新的订单号生成器
+            return gen.generate(strategy_name, signal_id)
+
+        # 降级：使用原有格式
         with self._lock:
             self._order_count += 1
             return f"TQ_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self._order_count:06d}"
@@ -416,7 +443,7 @@ class TqGateway(BaseGateway):
         try:
             from tqsdk import tafunc
 
-            order_id = self._generate_order_id()
+            order_id = self._generate_order_id(request.strategy_name, request.signal_id)
             tq_symbol = self._to_tq_symbol(request.symbol, request.exchange)
 
             # 转换方向和开平
