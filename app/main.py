@@ -48,6 +48,14 @@ try:
 except ImportError:
     HAS_SIM_TRADING = False
 
+# ETF回测模块
+try:
+    from app.pages.etf_backtest import render_etf_backtest_page
+    from app.pages.etf_data import render_etf_data_page
+    HAS_ETF = True
+except ImportError:
+    HAS_ETF = False
+
 import json
 
 # TqSdk配置文件路径
@@ -1216,10 +1224,10 @@ def main():
         st.title("📈 期货量化系统")
         st.markdown("---")
 
-        # 导航 - 6个一级菜单
+        # 导航 - 7个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "ETF回测", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1266,6 +1274,8 @@ def main():
         render_risk_center()
     elif page == "回测系统":
         render_backtest()
+    elif page == "ETF回测":
+        render_etf_backtest()
     elif page == "系统设置":
         render_settings()
 
@@ -1671,6 +1681,30 @@ def render_risk_center():
     })
 
     st.dataframe(logs_df, hide_index=True, use_container_width=True)
+
+
+def render_etf_backtest():
+    """渲染ETF回测系统页面"""
+    st.title("ETF回测系统")
+
+    if not HAS_ETF:
+        st.error("ETF模块未加载，请检查依赖: pip install akshare")
+        return
+
+    # ETF子页面选择
+    etf_page = st.radio(
+        "功能选择",
+        ["策略回测", "数据管理"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
+    if etf_page == "数据管理":
+        render_etf_data_page()
+    else:
+        render_etf_backtest_page()
 
 
 def render_backtest():

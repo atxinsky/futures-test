@@ -13,6 +13,9 @@ win10toast>=0.9; platform_system=="Windows"
 pandas>=2.0.0
 numpy>=1.24.0
 
+# ETF数据获取
+akshare>=1.12.0
+
 # 天勤量化SDK
 tqsdk>=3.0.0
 

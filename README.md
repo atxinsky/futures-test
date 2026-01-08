@@ -6,6 +6,7 @@
 
 ### Core Features
 - **Backtesting**: 专业回测引擎，支持70+期货品种
+- **ETF Backtesting**: ETF趋势轮动策略回测（BigBrother V14）
 - **Simulation Trading**: 模拟盘实时交易
 - **Risk Management**: 完整风控体系（持仓限制、日亏限制、最大回撤）
 - **Professional Web UI**: 基于Streamlit的专业交易界面
