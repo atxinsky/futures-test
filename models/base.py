@@ -60,6 +60,8 @@ class SignalAction(Enum):
     CLOSE = "close"
     CLOSE_LONG = "close_long"
     CLOSE_SHORT = "close_short"
+    ROLL_CLOSE = "roll_close"    # 换月平旧
+    ROLL_OPEN = "roll_open"      # 换月开新
 
 
 @dataclass
