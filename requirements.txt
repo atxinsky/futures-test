@@ -1,27 +1,27 @@
-# 期货量化交易系统依赖
+# 期货量化交易系统 v2.0 依赖
 
 # Web界面
 streamlit>=1.28.0
+plotly>=5.18.0
 
 # 数据处理
 pandas>=2.0.0
 numpy>=1.24.0
-scipy>=1.10.0
 
-# 可视化
-plotly>=5.15.0
-matplotlib>=3.7.0
+# 天勤量化SDK
+tqsdk>=3.0.0
 
-# 数据源
-akshare>=1.10.0
-requests>=2.28.0
-tqsdk>=3.7.0  # TianQin SDK - 实时数据和模拟交易
+# 配置管理
+PyYAML>=6.0
 
-# 配置
-pyyaml>=6.0
-
-# 工具
-python-dateutil>=2.8.0
+# 凭证管理
+keyring>=24.0.0
 
 # 测试
-pytest>=7.0.0
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# 可选：代码质量
+# flake8>=6.0.0
+# black>=23.0.0
+# mypy>=1.5.0

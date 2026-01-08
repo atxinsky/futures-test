@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, date
 from collections import defaultdict
 import logging
+import threading
+import json
 
 import sys
 import os
@@ -20,6 +22,7 @@ from models.base import (
 )
 from core.event_engine import EventEngine
 from trading.position_manager import PositionManager
+from utils.limit_price import get_limit_price_manager, LimitPriceManager
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +88,9 @@ class RiskManager:
         self.event_engine = event_engine
         self.config = config or RiskConfig()
 
+        # 线程锁 - 保证风控检查原子性
+        self._lock = threading.Lock()
+
         # 状态
         self.status = RiskStatus()
 
@@ -104,6 +110,12 @@ class RiskManager:
         self._peak_equity: float = 0.0
         self._initial_equity: float = 0.0
 
+        # 审计日志文件路径
+        self._audit_log_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'risk_audit.log'
+        )
+
         # 注册事件
         self.event_engine.register(EventType.TRADE, self._on_trade)
         self.event_engine.register(EventType.ACCOUNT, self._on_account)
@@ -119,9 +131,33 @@ class RiskManager:
         """设置持仓管理器"""
         self.position_manager = pm
 
+    def _estimate_margin(self, symbol: str, price: float, volume: int) -> float:
+        """
+        预估新订单所需保证金
+
+        Args:
+            symbol: 合约代码
+            price: 价格
+            volume: 手数
+
+        Returns:
+            预估保证金金额
+        """
+        try:
+            from config import get_instrument
+            inst = get_instrument(symbol)
+            if inst:
+                multiplier = inst.get('multiplier', 10)
+                margin_rate = inst.get('margin_rate', 0.1)
+                return price * multiplier * volume * margin_rate
+        except Exception as e:
+            logger.warning(f"预估保证金失败: {e}")
+        # 默认按10%保证金率估算
+        return price * volume * 10 * 0.1
+
     def check_order(self, request: OrderRequest) -> Tuple[bool, str]:
         """
-        订单风控检查
+        订单风控检查（线程安全）
 
         Args:
             request: 订单请求
@@ -132,52 +168,108 @@ class RiskManager:
         if not self.config.enabled:
             return True, ""
 
-        # 1. 检查账户
-        if not self.account:
-            return False, "账户未初始化"
+        # 使用锁保证原子性检查
+        with self._lock:
+            # 1. 检查账户
+            if not self.account:
+                self._audit_log("ORDER_REJECTED", request, "账户未初始化")
+                return False, "账户未初始化"
 
-        # 2. 检查资金
-        if self.account.available < self.config.min_available:
-            return False, f"可用资金不足: {self.account.available:.2f} < {self.config.min_available}"
+            # 2. 检查资金
+            if self.account.available < self.config.min_available:
+                reason = f"可用资金不足: {self.account.available:.2f} < {self.config.min_available}"
+                self._audit_log("ORDER_REJECTED", request, reason)
+                return False, reason
 
-        # 3. 检查保证金占用
-        if self.account.risk_ratio >= self.config.max_margin_ratio:
+            # 3. 检查保证金占用（含新订单预估）
             if request.offset == Offset.OPEN:
-                return False, f"保证金占用过高: {self.account.risk_ratio:.2%} >= {self.config.max_margin_ratio:.2%}"
+                # 预估新订单保证金
+                estimated_margin = self._estimate_margin(
+                    request.symbol,
+                    request.price if request.price > 0 else 0,
+                    request.volume
+                )
+                # 计算开仓后的预估保证金比例
+                new_margin = self.account.margin + estimated_margin
+                new_margin_ratio = new_margin / self.account.balance if self.account.balance > 0 else 1.0
 
-        # 4. 检查持仓限制（开仓时）
-        if request.offset == Offset.OPEN and self.position_manager:
-            # 单品种持仓限制
-            current_pos = abs(self.position_manager.get_net_position(request.symbol))
-            if current_pos + request.volume > self.config.max_position_per_symbol:
-                return False, f"超过单品种持仓限制: {current_pos} + {request.volume} > {self.config.max_position_per_symbol}"
+                if new_margin_ratio >= self.config.max_margin_ratio:
+                    reason = f"保证金占用将超限: {new_margin_ratio:.2%} >= {self.config.max_margin_ratio:.2%}"
+                    self._audit_log("ORDER_REJECTED", request, reason)
+                    return False, reason
 
-            # 总持仓限制
-            all_positions = self.position_manager.get_all_positions()
-            total_volume = sum(p.volume for p in all_positions)
-            if total_volume + request.volume > self.config.max_position_total:
-                return False, f"超过总持仓限制: {total_volume} + {request.volume} > {self.config.max_position_total}"
+                # 检查可用资金是否够开仓
+                if estimated_margin > self.account.available:
+                    reason = f"可用资金不足开仓: 需要 {estimated_margin:.2f}, 可用 {self.account.available:.2f}"
+                    self._audit_log("ORDER_REJECTED", request, reason)
+                    return False, reason
 
-        # 5. 检查日亏损限制
-        if self._daily_pnl < 0:
-            daily_loss_ratio = abs(self._daily_pnl) / self._initial_equity if self._initial_equity > 0 else 0
-            if daily_loss_ratio >= self.config.max_daily_loss_ratio:
-                if request.offset == Offset.OPEN:
-                    return False, f"日亏损超限: {daily_loss_ratio:.2%} >= {self.config.max_daily_loss_ratio:.2%}"
+            # 4. 检查涨跌停限制
+            if request.price > 0:  # 有报价时检查
+                limit_mgr = get_limit_price_manager()
+                is_valid, limit_reason = limit_mgr.check_price_valid(
+                    request.symbol,
+                    request.price
+                )
+                if not is_valid:
+                    self._audit_log("ORDER_REJECTED", request, f"涨跌停限制: {limit_reason}")
+                    return False, f"涨跌停限制: {limit_reason}"
 
-        # 6. 检查连续亏损
-        if self._consecutive_losses >= self.config.max_consecutive_losses:
-            if request.offset == Offset.OPEN and not self.config.allow_open_when_risk:
-                return False, f"连续亏损次数超限: {self._consecutive_losses} >= {self.config.max_consecutive_losses}"
+                # 警告接近涨跌停
+                info = limit_mgr.get_limit_price(request.symbol)
+                if info:
+                    # 接近涨停（距离小于1%）
+                    if info.limit_up > 0 and request.price > info.limit_up * 0.99:
+                        logger.warning(f"[风控] 订单价格接近涨停: {request.symbol} {request.price:.2f} (涨停: {info.limit_up:.2f})")
+                    # 接近跌停（距离小于1%）
+                    if info.limit_down > 0 and request.price < info.limit_down * 1.01:
+                        logger.warning(f"[风控] 订单价格接近跌停: {request.symbol} {request.price:.2f} (跌停: {info.limit_down:.2f})")
 
-        # 7. 检查回撤
-        if self._peak_equity > 0 and self.account.balance < self._peak_equity:
-            drawdown = (self._peak_equity - self.account.balance) / self._peak_equity
-            if drawdown >= self.config.max_drawdown_ratio:
-                if request.offset == Offset.OPEN:
-                    return False, f"回撤超限: {drawdown:.2%} >= {self.config.max_drawdown_ratio:.2%}"
+            # 5. 检查持仓限制（开仓时）
+            if request.offset == Offset.OPEN and self.position_manager:
+                # 单品种持仓限制
+                current_pos = abs(self.position_manager.get_net_position(request.symbol))
+                if current_pos + request.volume > self.config.max_position_per_symbol:
+                    reason = f"超过单品种持仓限制: {current_pos} + {request.volume} > {self.config.max_position_per_symbol}"
+                    self._audit_log("ORDER_REJECTED", request, reason)
+                    return False, reason
 
-        return True, ""
+                # 总持仓限制
+                all_positions = self.position_manager.get_all_positions()
+                total_volume = sum(p.volume for p in all_positions)
+                if total_volume + request.volume > self.config.max_position_total:
+                    reason = f"超过总持仓限制: {total_volume} + {request.volume} > {self.config.max_position_total}"
+                    self._audit_log("ORDER_REJECTED", request, reason)
+                    return False, reason
+
+            # 5. 检查日亏损限制
+            if self._daily_pnl < 0:
+                daily_loss_ratio = abs(self._daily_pnl) / self._initial_equity if self._initial_equity > 0 else 0
+                if daily_loss_ratio >= self.config.max_daily_loss_ratio:
+                    if request.offset == Offset.OPEN:
+                        reason = f"日亏损超限: {daily_loss_ratio:.2%} >= {self.config.max_daily_loss_ratio:.2%}"
+                        self._audit_log("ORDER_REJECTED", request, reason)
+                        return False, reason
+
+            # 6. 检查连续亏损
+            if self._consecutive_losses >= self.config.max_consecutive_losses:
+                if request.offset == Offset.OPEN and not self.config.allow_open_when_risk:
+                    reason = f"连续亏损次数超限: {self._consecutive_losses} >= {self.config.max_consecutive_losses}"
+                    self._audit_log("ORDER_REJECTED", request, reason)
+                    return False, reason
+
+            # 7. 检查回撤
+            if self._peak_equity > 0 and self.account.balance < self._peak_equity:
+                drawdown = (self._peak_equity - self.account.balance) / self._peak_equity
+                if drawdown >= self.config.max_drawdown_ratio:
+                    if request.offset == Offset.OPEN:
+                        reason = f"回撤超限: {drawdown:.2%} >= {self.config.max_drawdown_ratio:.2%}"
+                        self._audit_log("ORDER_REJECTED", request, reason)
+                        return False, reason
+
+            # 通过所有检查
+            self._audit_log("ORDER_PASSED", request, "风控检查通过")
+            return True, ""
 
     def _on_trade(self, event: Event):
         """处理成交事件"""
@@ -193,9 +285,24 @@ class RiskManager:
 
         # 统计盈亏（仅平仓有意义）
         if trade.offset != Offset.OPEN:
-            # 需要从position_manager获取盈亏
-            # 这里简化处理，假设成交后会更新account
-            pass
+            # 从 trade 对象获取实现盈亏
+            realized_pnl = getattr(trade, 'realized_pnl', 0.0)
+
+            if realized_pnl >= 0:
+                self._daily_wins += 1
+                self._consecutive_losses = 0
+                logger.info(f"[风控] 盈利交易: {trade.symbol} +{realized_pnl:.2f}")
+            else:
+                self._daily_losses += 1
+                self._consecutive_losses += 1
+                logger.warning(f"[风控] 亏损交易: {trade.symbol} {realized_pnl:.2f}, 连续亏损: {self._consecutive_losses}")
+
+            # 记录审计日志
+            self._audit_log("TRADE_CLOSED", trade, f"盈亏: {realized_pnl:.2f}")
+
+            # 检查是否需要强平
+            if self._consecutive_losses >= self.config.max_consecutive_losses:
+                self._audit_log("RISK_ALERT", None, f"连续亏损达到{self._consecutive_losses}次，触发风控警告")
 
     def _on_account(self, event: Event):
         """处理账户事件"""
@@ -218,6 +325,50 @@ class RiskManager:
         self._daily_trades = 0
         self._daily_wins = 0
         self._daily_losses = 0
+
+    def _audit_log(self, event_type: str, data: any, message: str = ""):
+        """
+        风控审计日志
+
+        Args:
+            event_type: 事件类型 (ORDER_REJECTED, ORDER_PASSED, TRADE_CLOSED, RISK_ALERT)
+            data: 相关数据对象
+            message: 附加消息
+        """
+        try:
+            log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'event_type': event_type,
+                'message': message,
+                'risk_level': self.status.risk_level,
+                'consecutive_losses': self._consecutive_losses,
+                'daily_pnl': self._daily_pnl
+            }
+
+            # 添加数据详情
+            if data:
+                if hasattr(data, 'symbol'):
+                    log_entry['symbol'] = data.symbol
+                if hasattr(data, 'volume'):
+                    log_entry['volume'] = data.volume
+                if hasattr(data, 'price'):
+                    log_entry['price'] = data.price
+                if hasattr(data, 'direction'):
+                    log_entry['direction'] = str(data.direction)
+
+            # 写入日志文件
+            os.makedirs(os.path.dirname(self._audit_log_path), exist_ok=True)
+            with open(self._audit_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+            # 同时输出到logger
+            if event_type in ('ORDER_REJECTED', 'RISK_ALERT'):
+                logger.warning(f"[RISK_AUDIT] {event_type}: {message}")
+            else:
+                logger.info(f"[RISK_AUDIT] {event_type}: {message}")
+
+        except Exception as e:
+            logger.error(f"审计日志写入失败: {e}")
 
     def _update_status(self):
         """更新风险状态"""

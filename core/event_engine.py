@@ -6,10 +6,11 @@
 
 import asyncio
 import threading
-from queue import Queue, Empty
+from queue import PriorityQueue, Empty
 from collections import defaultdict
 from typing import Callable, Dict, List, Any
 from datetime import datetime
+from dataclasses import dataclass, field
 import logging
 
 import sys
@@ -19,6 +20,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.base import Event, EventType
 
 logger = logging.getLogger(__name__)
+
+
+# 事件优先级定义（数字越小优先级越高）
+EVENT_PRIORITY: Dict[EventType, int] = {
+    EventType.ERROR: 0,       # 错误事件 - 最高优先级
+    EventType.ACCOUNT: 2,     # 账户更新
+    EventType.POSITION: 3,    # 持仓更新
+    EventType.ORDER: 4,       # 订单事件
+    EventType.TRADE: 5,       # 成交事件
+    EventType.TICK: 6,        # Tick数据
+    EventType.BAR: 7,         # K线数据
+    EventType.TIMER: 8,       # 定时器事件
+}
+
+
+@dataclass(order=True)
+class PrioritizedEvent:
+    """带优先级的事件包装器"""
+    priority: int
+    sequence: int = field(compare=True)  # 同优先级时按序号排序
+    event: Event = field(compare=False)
+
+    @classmethod
+    def from_event(cls, event: Event, sequence: int) -> 'PrioritizedEvent':
+        priority = EVENT_PRIORITY.get(event.type, 5)  # 默认中等优先级
+        return cls(priority=priority, sequence=sequence, event=event)
 
 
 class EventEngine:
@@ -33,9 +60,17 @@ class EventEngine:
     """
 
     def __init__(self):
-        self._queue: Queue = Queue()
+        # 使用优先级队列，支持事件优先级
+        self._queue: PriorityQueue = PriorityQueue()
+        self._sequence: int = 0  # 事件序号，保证同优先级FIFO
+        self._sequence_lock = threading.Lock()
+
+        # Handler存储
         self._handlers: Dict[EventType, List[Callable]] = defaultdict(list)
         self._general_handlers: List[Callable] = []
+
+        # Handler操作锁 - 保证注册/注销原子性
+        self._handler_lock = threading.Lock()
 
         self._active: bool = False
         self._thread: threading.Thread = None
@@ -46,45 +81,74 @@ class EventEngine:
 
     def register(self, event_type: EventType, handler: Callable):
         """
-        注册事件处理器
+        注册事件处理器（线程安全）
 
         Args:
             event_type: 事件类型
             handler: 处理函数，接收Event参数
         """
-        if handler not in self._handlers[event_type]:
-            self._handlers[event_type].append(handler)
-            logger.debug(f"注册事件处理器: {event_type.value} -> {handler.__name__}")
+        with self._handler_lock:
+            if handler not in self._handlers[event_type]:
+                self._handlers[event_type].append(handler)
+                logger.debug(f"注册事件处理器: {event_type.value} -> {handler.__name__}")
 
     def unregister(self, event_type: EventType, handler: Callable):
-        """注销事件处理器"""
-        if handler in self._handlers[event_type]:
-            self._handlers[event_type].remove(handler)
+        """注销事件处理器（线程安全）"""
+        with self._handler_lock:
+            if handler in self._handlers[event_type]:
+                self._handlers[event_type].remove(handler)
+                logger.debug(f"注销事件处理器: {event_type.value} -> {handler.__name__}")
 
     def register_general(self, handler: Callable):
-        """注册通用处理器（接收所有事件）"""
-        if handler not in self._general_handlers:
-            self._general_handlers.append(handler)
+        """注册通用处理器（接收所有事件，线程安全）"""
+        with self._handler_lock:
+            if handler not in self._general_handlers:
+                self._general_handlers.append(handler)
 
     def register_timer(self, interval: int, handler: Callable):
         """
-        注册定时器处理器
+        注册定时器处理器（线程安全）
 
         Args:
             interval: 间隔秒数
             handler: 处理函数
         """
-        if handler not in self._timer_handlers[interval]:
-            self._timer_handlers[interval].append(handler)
+        with self._handler_lock:
+            if handler not in self._timer_handlers[interval]:
+                self._timer_handlers[interval].append(handler)
 
-    def put(self, event: Event):
-        """发送事件到队列"""
-        self._queue.put(event)
+    def put(self, event: Event, priority: int = None):
+        """
+        发送事件到队列
+
+        Args:
+            event: 事件对象
+            priority: 可选优先级覆盖（数字越小优先级越高）
+        """
+        with self._sequence_lock:
+            self._sequence += 1
+            seq = self._sequence
+
+        if priority is not None:
+            p_event = PrioritizedEvent(priority=priority, sequence=seq, event=event)
+        else:
+            p_event = PrioritizedEvent.from_event(event, seq)
+
+        self._queue.put(p_event)
 
     def emit(self, event_type: EventType, data: Any = None):
         """便捷方法：发送事件"""
         event = Event(type=event_type, data=data)
         self.put(event)
+
+    def emit_urgent(self, event_type: EventType, data: Any = None):
+        """发送高优先级事件（用于风控等紧急事件）"""
+        event = Event(type=event_type, data=data)
+        self.put(event, priority=0)  # 最高优先级
+
+    def get_queue_size(self) -> int:
+        """获取队列当前大小"""
+        return self._queue.qsize()
 
     def start(self):
         """启动事件引擎"""
@@ -121,25 +185,29 @@ class EventEngine:
         """事件处理循环"""
         while self._active:
             try:
-                event = self._queue.get(timeout=1)
-                self._process(event)
+                p_event: PrioritizedEvent = self._queue.get(timeout=1)
+                self._process(p_event.event)
             except Empty:
                 continue
             except Exception as e:
                 logger.error(f"事件处理异常: {e}", exc_info=True)
 
     def _process(self, event: Event):
-        """处理单个事件"""
+        """处理单个事件（使用handler副本，避免遍历时被修改）"""
+        # 获取handler副本（线程安全）
+        with self._handler_lock:
+            type_handlers = list(self._handlers.get(event.type, []))
+            general_handlers = list(self._general_handlers)
+
         # 调用特定类型处理器
-        if event.type in self._handlers:
-            for handler in self._handlers[event.type]:
-                try:
-                    handler(event)
-                except Exception as e:
-                    logger.error(f"处理器 {handler.__name__} 异常: {e}", exc_info=True)
+        for handler in type_handlers:
+            try:
+                handler(event)
+            except Exception as e:
+                logger.error(f"处理器 {handler.__name__} 异常: {e}", exc_info=True)
 
         # 调用通用处理器
-        for handler in self._general_handlers:
+        for handler in general_handlers:
             try:
                 handler(event)
             except Exception as e:

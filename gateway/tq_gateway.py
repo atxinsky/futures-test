@@ -22,6 +22,7 @@ from models.base import (
 )
 from core.event_engine import EventEngine
 from gateway.base_gateway import BaseGateway
+from utils.rate_limiter import GatewayRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,10 @@ class TqGateway(BaseGateway):
         # 计数器
         self._order_count = 0
         self._trade_count = 0
+
+        # 线程锁 - 保护订单操作
         self._lock = threading.Lock()
+        self._order_lock = threading.Lock()  # 订单专用锁
 
         # 数据线程
         self._data_thread: Optional[threading.Thread] = None
@@ -104,6 +108,13 @@ class TqGateway(BaseGateway):
 
         # 止损单管理
         self.stop_orders: Dict[str, dict] = {}  # order_id -> {symbol, direction, stop_price, volume, tag}
+
+        # 订单同步计数器
+        self._sync_counter = 0
+        self._sync_interval = 10  # 每10次循环同步一次
+
+        # 流控器
+        self.rate_limiter = GatewayRateLimiter()
 
     def connect(self, config: dict) -> bool:
         """
@@ -220,6 +231,12 @@ class TqGateway(BaseGateway):
 
                 # 更新订单状态
                 self._update_orders()
+
+                # 定期订单同步检查
+                self._sync_counter += 1
+                if self._sync_counter >= self._sync_interval:
+                    self._sync_counter = 0
+                    self._sync_orders()
 
             except Exception as e:
                 if self._running:
@@ -379,7 +396,7 @@ class TqGateway(BaseGateway):
 
     def send_order(self, request: OrderRequest) -> str:
         """
-        发送订单
+        发送订单（线程安全，带流控）
 
         Args:
             request: 订单请求
@@ -389,6 +406,11 @@ class TqGateway(BaseGateway):
         """
         if not self.api or not self.connected:
             self.on_error("网关未连接")
+            return ""
+
+        # 流控 - 下单使用order限流器
+        if not self.rate_limiter.acquire_for_order():
+            self.on_error("下单被流控拒绝，请稍后重试")
             return ""
 
         try:
@@ -436,9 +458,11 @@ class TqGateway(BaseGateway):
                 create_time=datetime.now()
             )
 
-            self.orders[order_id] = order
-            self.active_orders[order_id] = order
-            self.tq_orders[order_id] = tq_order
+            # 线程安全地更新订单存储
+            with self._order_lock:
+                self.orders[order_id] = order
+                self.active_orders[order_id] = order
+                self.tq_orders[order_id] = tq_order
 
             self.on_order(order)
             self.on_log(f"订单已提交: {order_id} {request.direction.value} {request.offset.value} "
@@ -451,28 +475,29 @@ class TqGateway(BaseGateway):
             return ""
 
     def cancel_order(self, order_id: str) -> bool:
-        """撤销订单"""
-        if order_id not in self.tq_orders:
-            self.on_error(f"订单不存在: {order_id}")
-            return False
+        """撤销订单（线程安全）"""
+        with self._order_lock:
+            if order_id not in self.tq_orders:
+                self.on_error(f"订单不存在: {order_id}")
+                return False
 
-        try:
-            tq_order = self.tq_orders[order_id]
-            self.api.cancel_order(tq_order)
+            try:
+                tq_order = self.tq_orders[order_id]
+                self.api.cancel_order(tq_order)
 
-            if order_id in self.active_orders:
-                order = self.active_orders[order_id]
-                order.status = OrderStatus.CANCELLED
-                order.update_time = datetime.now()
-                del self.active_orders[order_id]
-                self.on_order(order)
+                if order_id in self.active_orders:
+                    order = self.active_orders[order_id]
+                    order.status = OrderStatus.CANCELLED
+                    order.update_time = datetime.now()
+                    del self.active_orders[order_id]
+                    self.on_order(order)
 
-            self.on_log(f"订单已撤销: {order_id}")
-            return True
+                self.on_log(f"订单已撤销: {order_id}")
+                return True
 
-        except Exception as e:
-            self.on_error(f"撤单失败: {e}")
-            return False
+            except Exception as e:
+                self.on_error(f"撤单失败: {e}")
+                return False
 
     def set_stop_loss(self, order_id: str, symbol: str, direction: Direction,
                       stop_price: float, volume: int, tag: str = "stop_loss"):
@@ -628,12 +653,15 @@ class TqGateway(BaseGateway):
             logger.debug(f"持仓更新错误: {e}")
 
     def _update_orders(self):
-        """更新订单状态"""
-        for order_id, tq_order in list(self.tq_orders.items()):
-            if order_id not in self.orders:
-                continue
+        """更新订单状态（线程安全）"""
+        with self._order_lock:
+            orders_to_process = list(self.tq_orders.items())
 
-            order = self.orders[order_id]
+        for order_id, tq_order in orders_to_process:
+            with self._order_lock:
+                if order_id not in self.orders:
+                    continue
+                order = self.orders[order_id]
 
             try:
                 # 检查订单状态
@@ -647,8 +675,9 @@ class TqGateway(BaseGateway):
 
                     order.update_time = datetime.now()
 
-                    if order_id in self.active_orders:
-                        del self.active_orders[order_id]
+                    with self._order_lock:
+                        if order_id in self.active_orders:
+                            del self.active_orders[order_id]
 
                     self.on_order(order)
 
@@ -667,15 +696,60 @@ class TqGateway(BaseGateway):
                             trade_time=datetime.now(),
                             strategy_name=order.strategy_name
                         )
-                        self.trades.append(trade)
+                        with self._order_lock:
+                            self.trades.append(trade)
                         self.on_trade(trade)
 
             except Exception as e:
                 logger.debug(f"订单状态更新错误: {e}")
 
+    def _sync_orders(self):
+        """
+        订单同步检查 - 确保本地订单和TqSdk订单一致
+
+        定期检查并清理已完成但未正确处理的订单
+        """
+        with self._order_lock:
+            # 清理已完成的订单（从active_orders中）
+            completed_ids = []
+            for order_id, order in self.active_orders.items():
+                if order.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                    completed_ids.append(order_id)
+
+            for order_id in completed_ids:
+                del self.active_orders[order_id]
+                logger.debug(f"[订单同步] 清理已完成订单: {order_id}")
+
+            # 检查tq_orders中已完成的订单
+            tq_completed = []
+            for order_id, tq_order in self.tq_orders.items():
+                try:
+                    if tq_order.status == "FINISHED":
+                        if order_id in self.active_orders:
+                            # 本地还是活动状态但TqSdk已完成，需要同步
+                            order = self.active_orders[order_id]
+                            if tq_order.volume_left == 0:
+                                order.status = OrderStatus.FILLED
+                            else:
+                                order.status = OrderStatus.CANCELLED
+                            order.update_time = datetime.now()
+                            tq_completed.append(order_id)
+                            logger.warning(f"[订单同步] 修复订单状态漂移: {order_id}")
+                except:
+                    pass
+
+            for order_id in tq_completed:
+                if order_id in self.active_orders:
+                    del self.active_orders[order_id]
+
     def query_account(self) -> Optional[Account]:
-        """查询账户"""
+        """查询账户（带流控）"""
         if not self.api:
+            return None
+
+        # 流控
+        if not self.rate_limiter.acquire_for_query():
+            logger.warning("查询账户被流控拒绝")
             return None
 
         try:

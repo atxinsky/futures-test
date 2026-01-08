@@ -19,6 +19,7 @@ from models.base import (
     Direction, Offset, EventType, Event
 )
 from core.event_engine import EventEngine
+from utils.state_persistence import get_state_persistence, StatePersistence
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,14 @@ class PositionManager:
     4. 持仓统计
     """
 
-    def __init__(self, event_engine: EventEngine):
+    def __init__(self, event_engine: EventEngine, enable_persistence: bool = True):
+        """
+        初始化持仓管理器
+
+        Args:
+            event_engine: 事件引擎
+            enable_persistence: 是否启用持久化（实盘建议开启）
+        """
         self.event_engine = event_engine
 
         # 持仓存储 {symbol: {direction: Position}}
@@ -49,6 +57,12 @@ class PositionManager:
         # 锁
         self._lock = threading.Lock()
 
+        # 持久化支持
+        self._enable_persistence = enable_persistence
+        self._persistence: Optional[StatePersistence] = None
+        if enable_persistence:
+            self._persistence = get_state_persistence()
+
         # 注册事件处理
         self.event_engine.register(EventType.POSITION, self._on_position_event)
         self.event_engine.register(EventType.TRADE, self._on_trade_event)
@@ -56,16 +70,18 @@ class PositionManager:
         self.event_engine.register(EventType.TICK, self._on_tick_event)
 
     def set_instrument_config(self, symbol: str, config: dict):
-        """设置品种配置"""
-        self.instrument_configs[symbol] = config
+        """设置品种配置（线程安全）"""
+        with self._lock:
+            self.instrument_configs[symbol] = config
 
     def get_instrument_config(self, symbol: str) -> dict:
-        """获取品种配置"""
-        product = ''.join([c for c in symbol if c.isalpha()]).upper()
-        return self.instrument_configs.get(product, self.instrument_configs.get(symbol, {
-            'multiplier': 10,
-            'margin_rate': 0.1
-        }))
+        """获取品种配置（线程安全）"""
+        with self._lock:
+            product = ''.join([c for c in symbol if c.isalpha()]).upper()
+            return self.instrument_configs.get(product, self.instrument_configs.get(symbol, {
+                'multiplier': 10,
+                'margin_rate': 0.1
+            }))
 
     def _on_position_event(self, event: Event):
         """处理持仓事件"""
@@ -85,13 +101,15 @@ class PositionManager:
     def _on_bar_event(self, event: Event):
         """处理K线事件"""
         bar: BarData = event.data
-        self.last_prices[bar.symbol] = bar.close
+        with self._lock:
+            self.last_prices[bar.symbol] = bar.close
         self._update_pnl(bar.symbol, bar.close)
 
     def _on_tick_event(self, event: Event):
         """处理Tick事件"""
         tick: TickData = event.data
-        self.last_prices[tick.symbol] = tick.last_price
+        with self._lock:
+            self.last_prices[tick.symbol] = tick.last_price
         self._update_pnl(tick.symbol, tick.last_price)
 
     def _update_on_trade(self, trade: Trade):
@@ -153,8 +171,33 @@ class PositionManager:
 
                     if pos.volume <= 0:
                         del self.positions[trade.symbol][close_direction]
+                        # 持久化：删除已平仓的持仓记录
+                        if self._persistence:
+                            self._persistence.delete_position(
+                                trade.symbol,
+                                str(close_direction.value) if hasattr(close_direction, 'value') else str(close_direction)
+                            )
                     else:
                         pos.margin = pos.avg_price * pos.volume * multiplier * margin_rate
+
+            # 持久化：保存成交记录和持仓状态
+            if self._persistence:
+                # 保存成交
+                self._persistence.save_trade({
+                    'trade_id': trade.trade_id,
+                    'order_id': trade.order_id,
+                    'symbol': trade.symbol,
+                    'exchange': str(trade.exchange) if trade.exchange else '',
+                    'direction': str(trade.direction.value) if hasattr(trade.direction, 'value') else str(trade.direction),
+                    'offset': str(trade.offset.value) if hasattr(trade.offset, 'value') else str(trade.offset),
+                    'price': trade.price,
+                    'volume': trade.volume,
+                    'trade_time': trade.trade_time.isoformat() if trade.trade_time else '',
+                    'strategy_name': trade.strategy_name
+                })
+
+                # 保存当前持仓状态
+                self._save_position_to_db(trade.symbol)
 
     def _update_pnl(self, symbol: str, current_price: float):
         """更新浮动盈亏"""
@@ -194,14 +237,18 @@ class PositionManager:
         return self.get_position(symbol, Direction.SHORT)
 
     def get_net_position(self, symbol: str) -> int:
-        """获取净持仓"""
-        long_pos = self.get_long_position(symbol)
-        short_pos = self.get_short_position(symbol)
+        """获取净持仓（线程安全）"""
+        with self._lock:
+            long_vol = 0
+            short_vol = 0
 
-        long_vol = long_pos.volume if long_pos else 0
-        short_vol = short_pos.volume if short_pos else 0
+            if symbol in self.positions:
+                if Direction.LONG in self.positions[symbol]:
+                    long_vol = self.positions[symbol][Direction.LONG].volume
+                if Direction.SHORT in self.positions[symbol]:
+                    short_vol = self.positions[symbol][Direction.SHORT].volume
 
-        return long_vol - short_vol
+            return long_vol - short_vol
 
     def get_all_positions(self) -> List[Position]:
         """获取所有持仓"""
@@ -241,7 +288,7 @@ class PositionManager:
 
     def check_stop_loss(self, symbol: str, direction: Direction, stop_price: float) -> bool:
         """
-        检查是否触发止损
+        检查是否触发止损（线程安全）
 
         Args:
             symbol: 合约
@@ -251,7 +298,9 @@ class PositionManager:
         Returns:
             是否触发
         """
-        current_price = self.last_prices.get(symbol, 0)
+        with self._lock:
+            current_price = self.last_prices.get(symbol, 0)
+
         if current_price == 0:
             return False
 
@@ -262,7 +311,7 @@ class PositionManager:
 
     def check_trailing_stop(self, symbol: str, direction: Direction, atr_multiplier: float, atr: float) -> bool:
         """
-        检查移动止损
+        检查移动止损（线程安全）
 
         Args:
             symbol: 合约
@@ -273,11 +322,15 @@ class PositionManager:
         Returns:
             是否触发
         """
-        pos = self.get_position(symbol, direction)
+        with self._lock:
+            pos = None
+            if symbol in self.positions and direction in self.positions[symbol]:
+                pos = self.positions[symbol][direction]
+            current_price = self.last_prices.get(symbol, 0)
+
         if not pos:
             return False
 
-        current_price = self.last_prices.get(symbol, 0)
         if current_price == 0:
             return False
 
@@ -308,3 +361,121 @@ class PositionManager:
             'realized_pnl': realized,
             'total_margin': total_margin
         }
+
+    # ============ 持久化方法 ============
+
+    def _save_position_to_db(self, symbol: str):
+        """保存指定品种的持仓到数据库"""
+        if not self._persistence:
+            return
+
+        if symbol not in self.positions:
+            return
+
+        for direction, pos in self.positions[symbol].items():
+            if pos.volume > 0:
+                self._persistence.save_position({
+                    'symbol': pos.symbol,
+                    'exchange': str(pos.exchange) if pos.exchange else '',
+                    'direction': str(direction.value) if hasattr(direction, 'value') else str(direction),
+                    'volume': pos.volume,
+                    'avg_price': pos.avg_price,
+                    'margin': pos.margin,
+                    'unrealized_pnl': pos.unrealized_pnl,
+                    'realized_pnl': pos.realized_pnl,
+                    'highest_price': pos.highest_price,
+                    'lowest_price': pos.lowest_price,
+                    'entry_time': pos.entry_time.isoformat() if pos.entry_time else '',
+                    'strategy_name': pos.strategy_name
+                })
+
+    def save_all_to_db(self):
+        """保存所有持仓到数据库"""
+        if not self._persistence:
+            logger.warning("持久化未启用，无法保存")
+            return
+
+        positions_data = []
+        with self._lock:
+            for symbol, directions in self.positions.items():
+                for direction, pos in directions.items():
+                    if pos.volume > 0:
+                        positions_data.append({
+                            'symbol': pos.symbol,
+                            'exchange': str(pos.exchange) if pos.exchange else '',
+                            'direction': str(direction.value) if hasattr(direction, 'value') else str(direction),
+                            'volume': pos.volume,
+                            'avg_price': pos.avg_price,
+                            'margin': pos.margin,
+                            'unrealized_pnl': pos.unrealized_pnl,
+                            'realized_pnl': pos.realized_pnl,
+                            'highest_price': pos.highest_price,
+                            'lowest_price': pos.lowest_price,
+                            'entry_time': pos.entry_time.isoformat() if pos.entry_time else '',
+                            'strategy_name': pos.strategy_name
+                        })
+
+        self._persistence.save_all_positions(positions_data)
+        logger.info(f"保存 {len(positions_data)} 个持仓到数据库")
+
+    def load_from_db(self) -> int:
+        """
+        从数据库加载持仓（程序启动时调用）
+
+        Returns:
+            加载的持仓数量
+        """
+        if not self._persistence:
+            logger.warning("持久化未启用，无法加载")
+            return 0
+
+        positions_data = self._persistence.load_positions()
+
+        with self._lock:
+            for pos_data in positions_data:
+                symbol = pos_data['symbol']
+                direction_str = pos_data['direction']
+
+                # 解析方向
+                if direction_str in ('LONG', '1', 'Direction.LONG'):
+                    direction = Direction.LONG
+                elif direction_str in ('SHORT', '-1', 'Direction.SHORT'):
+                    direction = Direction.SHORT
+                else:
+                    logger.warning(f"未知持仓方向: {direction_str}")
+                    continue
+
+                # 解析入场时间
+                entry_time = None
+                if pos_data.get('entry_time'):
+                    try:
+                        entry_time = datetime.fromisoformat(pos_data['entry_time'])
+                    except:
+                        pass
+
+                # 创建持仓对象
+                pos = Position(
+                    symbol=symbol,
+                    exchange=pos_data.get('exchange', ''),
+                    direction=direction,
+                    volume=pos_data['volume'],
+                    avg_price=pos_data['avg_price'],
+                    margin=pos_data.get('margin', 0),
+                    unrealized_pnl=pos_data.get('unrealized_pnl', 0),
+                    realized_pnl=pos_data.get('realized_pnl', 0),
+                    highest_price=pos_data.get('highest_price', 0),
+                    lowest_price=pos_data.get('lowest_price', 0),
+                    entry_time=entry_time,
+                    strategy_name=pos_data.get('strategy_name', '')
+                )
+
+                self.positions[symbol][direction] = pos
+
+        logger.info(f"从数据库加载 {len(positions_data)} 个持仓")
+        return len(positions_data)
+
+    def clear_db(self):
+        """清空数据库中的持仓记录"""
+        if self._persistence:
+            self._persistence.save_all_positions([])
+            logger.info("已清空数据库持仓记录")

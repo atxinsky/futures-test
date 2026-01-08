@@ -19,6 +19,8 @@ services:
       - ./trading:/app/trading
       - ./models:/app/models
       - ./app:/app/app
+      - ./utils:/app/utils
+      - ./tests:/app/tests
       - ./config.py:/app/config.py
       - ./tq_config.json:/app/tq_config.json
     environment:
@@ -47,6 +49,7 @@ services:
       - ./gateway:/app/gateway
       - ./trading:/app/trading
       - ./models:/app/models
+      - ./utils:/app/utils
       - ./config.py:/app/config.py
       - ./tq_config.json:/app/tq_config.json
     environment:
@@ -84,6 +87,8 @@ services:
       - ./trading:/app/trading
       - ./models:/app/models
       - ./app:/app/app
+      - ./utils:/app/utils
+      - ./tests:/app/tests
       - ./config.py:/app/config.py
       - ./tq_config.json:/app/tq_config.json
     environment:

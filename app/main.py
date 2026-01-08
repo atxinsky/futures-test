@@ -51,65 +51,28 @@ except ImportError:
 import json
 
 # TqSdk配置文件路径
-TQ_CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tq_config.json")
-
-
-def load_tq_config_for_settings() -> dict:
-    """加载TqSdk配置（用于系统设置）"""
-    if os.path.exists(TQ_CONFIG_FILE):
-        try:
-            with open(TQ_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            pass
-    return {
-        'tq_user': '',
-        'tq_password': '',
-        'sim_mode': True,
-        'broker_id': '',
-        'td_account': '',
-        'td_password': '',
-        'default_symbols': ['RB', 'AU', 'IF'],
-        'initial_capital': 100000,
-        'risk_config': {
-            'max_position_per_symbol': 10,
-            'max_daily_loss': 0.05,
-            'max_drawdown': 0.15
-        }
-    }
-
-
-def save_tq_config_for_settings(config: dict):
-    """保存TqSdk配置（用于系统设置）"""
-    with open(TQ_CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+# 使用统一的配置管理模块
+from utils.tq_config import (
+    load_tq_config_for_settings,
+    save_tq_config_for_settings,
+    test_tq_connection,
+    get_tq_config_manager
+)
 
 
 def test_tq_connection_settings(tq_user: str, tq_password: str):
-    """测试天勤连接"""
+    """测试天勤连接（使用统一配置管理模块）"""
     if not tq_user or not tq_password:
         st.error("请输入天勤账号和密码")
         return
 
-    try:
-        from tqsdk import TqApi, TqAuth
+    with st.spinner("正在连接天勤..."):
+        success, message = test_tq_connection(tq_user, tq_password)
 
-        with st.spinner("正在连接天勤..."):
-            auth = TqAuth(tq_user, tq_password)
-            api = TqApi(auth=auth)
-
-            # 获取行情测试
-            quote = api.get_quote("SHFE.rb2505")
-            api.wait_update()
-
-            api.close()
-
-        st.success(f"连接成功! 测试行情: RB2505 最新价 {quote.last_price}")
-
-    except ImportError:
-        st.error("TqSdk未安装，请执行: pip install tqsdk")
-    except Exception as e:
-        st.error(f"连接失败: {e}")
+    if success:
+        st.success(f"连接成功! {message}")
+    else:
+        st.error(message)
 
 
 # ============ 回测辅助函数 ============
@@ -1104,9 +1067,11 @@ st.markdown("""
         --text-secondary: #333333;
     }
 
-    /* 隐藏默认菜单 */
+    /* 隐藏默认菜单和多页面导航 */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    [data-testid="stSidebarNav"] {display: none;}
+    header[data-testid="stHeader"] {display: none;}
 
     /* 全局文字颜色 */
     .stMarkdown, .stText, p, span, label, div {

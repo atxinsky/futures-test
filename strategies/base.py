@@ -5,6 +5,7 @@
 """
 
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
@@ -90,8 +91,10 @@ class BaseStrategy(ABC):
         self.current_symbol: str = ""
         self.current_exchange: str = ""
 
-        # K线数据缓存（实盘模式）
-        self._bar_cache: Dict[str, pd.DataFrame] = {}
+        # K线数据缓存（实盘模式）- 使用deque实现O(1)追加
+        self._bar_cache: Dict[str, deque] = {}  # 原始K线数据deque
+        self._bar_df_cache: Dict[str, pd.DataFrame] = {}  # DataFrame缓存
+        self._bar_df_dirty: Dict[str, bool] = {}  # 是否需要重建DataFrame
         self._max_cache_size: int = 500
 
         # 信号回调
@@ -181,6 +184,8 @@ class BaseStrategy(ABC):
         self.record_high = 0
         self.record_low = float('inf')
         self._bar_cache.clear()
+        self._bar_df_cache.clear()
+        self._bar_df_dirty.clear()
 
     # ============ 实盘模式支持 ============
 
@@ -226,12 +231,17 @@ class BaseStrategy(ABC):
 
         symbol = bar_data.get('symbol', self.current_symbol)
 
-        # 更新K线缓存
+        # 更新K线缓存（O(1)操作）
         self._update_bar_cache(symbol, bar_data)
 
-        # 获取完整数据
-        df = self._bar_cache.get(symbol)
-        if df is None or len(df) < self.warmup_num:
+        # 检查是否有足够数据
+        bar_queue = self._bar_cache.get(symbol)
+        if bar_queue is None or len(bar_queue) < self.warmup_num:
+            return
+
+        # 获取DataFrame（仅在需要时转换）
+        df = self._get_bar_df(symbol)
+        if df is None:
             return
 
         # 计算指标
@@ -247,26 +257,48 @@ class BaseStrategy(ABC):
             self._process_live_signal(signal, symbol)
 
     def _update_bar_cache(self, symbol: str, bar_data: dict):
-        """更新K线缓存"""
+        """
+        更新K线缓存（O(1)复杂度）
+
+        使用deque代替pd.concat，避免O(n)的内存复制
+        """
         if symbol not in self._bar_cache:
-            self._bar_cache[symbol] = pd.DataFrame()
+            # 使用maxlen自动限制大小，deque会自动丢弃旧数据
+            self._bar_cache[symbol] = deque(maxlen=self._max_cache_size)
+            self._bar_df_dirty[symbol] = True
 
-        df = self._bar_cache[symbol]
-
-        new_row = pd.DataFrame([{
+        # 追加新K线数据（O(1)操作）
+        bar_record = {
             'time': bar_data.get('datetime', datetime.now()),
             'open': bar_data.get('open', 0),
             'high': bar_data.get('high', 0),
             'low': bar_data.get('low', 0),
             'close': bar_data.get('close', 0),
             'volume': bar_data.get('volume', 0)
-        }])
+        }
+        self._bar_cache[symbol].append(bar_record)
 
-        self._bar_cache[symbol] = pd.concat([df, new_row], ignore_index=True)
+        # 标记DataFrame需要更新
+        self._bar_df_dirty[symbol] = True
 
-        # 限制缓存大小
-        if len(self._bar_cache[symbol]) > self._max_cache_size:
-            self._bar_cache[symbol] = self._bar_cache[symbol].tail(self._max_cache_size).reset_index(drop=True)
+    def _get_bar_df(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        获取K线DataFrame（带缓存）
+
+        仅在数据变化时重建DataFrame
+        """
+        if symbol not in self._bar_cache:
+            return None
+
+        # 检查是否需要重建DataFrame
+        if self._bar_df_dirty.get(symbol, True) or symbol not in self._bar_df_cache:
+            bar_list = list(self._bar_cache[symbol])
+            if not bar_list:
+                return None
+            self._bar_df_cache[symbol] = pd.DataFrame(bar_list)
+            self._bar_df_dirty[symbol] = False
+
+        return self._bar_df_cache[symbol]
 
     def _get_available_capital(self) -> float:
         """获取可用资金"""
@@ -334,7 +366,25 @@ class BaseStrategy(ABC):
             symbol: 合约代码
             bars: 历史K线DataFrame
         """
-        self._bar_cache[symbol] = bars.tail(self._max_cache_size).reset_index(drop=True)
+        # 转换DataFrame为deque
+        self._bar_cache[symbol] = deque(maxlen=self._max_cache_size)
+
+        # 取最后N条数据加入deque
+        bars_tail = bars.tail(self._max_cache_size)
+        for _, row in bars_tail.iterrows():
+            bar_record = {
+                'time': row.get('time', row.get('datetime', datetime.now())),
+                'open': row.get('open', 0),
+                'high': row.get('high', 0),
+                'low': row.get('low', 0),
+                'close': row.get('close', 0),
+                'volume': row.get('volume', 0)
+            }
+            self._bar_cache[symbol].append(bar_record)
+
+        # 标记需要重建DataFrame
+        self._bar_df_dirty[symbol] = True
+
         logger.info(f"策略 {self.name} 加载 {symbol} 历史K线 {len(self._bar_cache[symbol])} 条")
 
     # ============ 工具方法 ============

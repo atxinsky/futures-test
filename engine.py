@@ -11,63 +11,11 @@ from typing import Dict, List, Optional, Tuple, Type
 from dataclasses import dataclass, field
 from config import get_instrument, calculate_commission, calculate_pnl, INSTRUMENTS
 
-@dataclass
-class Trade:
-    """交易记录"""
-    trade_id: int
-    symbol: str
-    direction: int  # 1=多, -1=空
-    entry_time: datetime
-    entry_price: float
-    entry_tag: str
-    volume: int
-    exit_time: Optional[datetime] = None
-    exit_price: Optional[float] = None
-    exit_tag: Optional[str] = None
-    pnl: float = 0
-    pnl_pct: float = 0
-    commission: float = 0
-    holding_days: int = 0
-    max_profit: float = 0
-    max_loss: float = 0
-    capital_before: float = 0
-    capital_after: float = 0
+# 使用统一的回测数据模型
+from models.backtest_models import BacktestTrade, BacktestResult
 
-@dataclass
-class BacktestResult:
-    """回测结果"""
-    symbol: str
-    strategy: str
-    start_date: datetime
-    end_date: datetime
-    initial_capital: float
-    final_capital: float
-    trades: List[Trade]
-    equity_curve: pd.DataFrame
-    daily_returns: pd.Series
-
-    # 统计指标
-    total_pnl: float = 0
-    total_return_pct: float = 0
-    annual_return_pct: float = 0
-    max_drawdown_pct: float = 0
-    max_drawdown_val: float = 0
-    sharpe_ratio: float = 0
-    sortino_ratio: float = 0
-    calmar_ratio: float = 0
-    win_rate: float = 0
-    profit_factor: float = 0
-    avg_win: float = 0
-    avg_loss: float = 0
-    max_win: float = 0
-    max_loss: float = 0
-    avg_holding_days: float = 0
-    total_commission: float = 0
-
-    # 分组统计
-    monthly_stats: pd.DataFrame = None
-    yearly_stats: pd.DataFrame = None
-    exit_tag_stats: Dict = None
+# 兼容性别名（保持旧代码可用）
+Trade = BacktestTrade
 
 
 def run_backtest_with_strategy(

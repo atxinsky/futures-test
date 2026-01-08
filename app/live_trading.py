@@ -21,36 +21,8 @@ from strategies import get_all_strategies, get_strategy
 
 logger = logging.getLogger(__name__)
 
-# 配置文件路径
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tq_config.json")
-
-
-def load_tq_config() -> dict:
-    """加载TqSdk配置"""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {
-        'tq_user': '',
-        'tq_password': '',
-        'sim_mode': True,
-        'broker_id': '',
-        'td_account': '',
-        'td_password': '',
-        'default_symbols': ['RB', 'AU', 'IF'],
-        'initial_capital': 100000,
-        'risk_config': {
-            'max_position_per_symbol': 10,
-            'max_daily_loss': 0.05,
-            'max_drawdown': 0.15
-        }
-    }
-
-
-def save_tq_config(config: dict):
-    """保存TqSdk配置"""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+# 使用统一的配置管理模块
+from utils.tq_config import load_tq_config, save_tq_config
 
 
 def get_live_engine():

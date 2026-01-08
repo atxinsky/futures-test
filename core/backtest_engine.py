@@ -17,66 +17,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategies.base import BaseStrategy, Signal
 from utils.data_loader import DataLoader, get_data_loader
+from utils.limit_price import get_limit_price_manager, LimitPriceManager
+
+# 使用统一的回测数据模型
+from models.backtest_models import BacktestTrade, BacktestResult
+
+# 兼容性别名（保持旧代码可用）
+TradeRecord = BacktestTrade
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TradeRecord:
-    """交易记录"""
-    entry_time: datetime
-    exit_time: datetime
-    symbol: str
-    direction: int  # 1=多, -1=空
-    entry_price: float
-    exit_price: float
-    volume: int
-    pnl: float
-    pnl_pct: float
-    holding_bars: int
-    tag: str = ""
-
-
-@dataclass
-class BacktestResult:
-    """回测结果"""
-    # 基本信息
-    strategy_name: str
-    symbol: str
-    period: str
-    start_date: datetime
-    end_date: datetime
-    initial_capital: float
-
-    # 收益指标
-    final_capital: float = 0.0
-    total_return: float = 0.0
-    annual_return: float = 0.0
-    max_drawdown: float = 0.0
-    max_drawdown_pct: float = 0.0
-
-    # 风险指标
-    sharpe_ratio: float = 0.0
-    sortino_ratio: float = 0.0
-    calmar_ratio: float = 0.0
-    volatility: float = 0.0
-
-    # 交易统计
-    total_trades: int = 0
-    winning_trades: int = 0
-    losing_trades: int = 0
-    win_rate: float = 0.0
-    profit_factor: float = 0.0
-    avg_profit: float = 0.0
-    avg_loss: float = 0.0
-    max_profit: float = 0.0
-    max_loss: float = 0.0
-    avg_holding_bars: float = 0.0
-
-    # 详细数据
-    trades: List[TradeRecord] = field(default_factory=list)
-    equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
-    daily_returns: pd.Series = field(default_factory=pd.Series)
 
 
 class BacktestEngine:
@@ -126,7 +75,8 @@ class BacktestEngine:
         end_date: datetime = None,
         initial_capital: float = 100000.0,
         volume: int = 1,
-        commission_rate: float = None
+        commission_rate: float = None,
+        check_limit_price: bool = True
     ) -> BacktestResult:
         """
         运行回测
@@ -140,6 +90,7 @@ class BacktestEngine:
             initial_capital: 初始资金
             volume: 每笔交易数量
             commission_rate: 手续费率（覆盖默认值）
+            check_limit_price: 是否检查涨跌停限制
 
         Returns:
             BacktestResult
@@ -188,11 +139,20 @@ class BacktestEngine:
         trades: List[TradeRecord] = []
         equity_history = []
 
+        # 涨跌停管理器
+        limit_mgr = get_limit_price_manager() if check_limit_price else None
+        limit_skip_count = 0  # 因涨跌停跳过的交易次数
+
         # 逐K线回测
         for idx in range(strategy.warmup_num, len(df)):
             current_bar = df.iloc[idx]
             current_time = current_bar['time'] if 'time' in current_bar else datetime.now()
             current_price = current_bar['close']
+
+            # 更新涨跌停价格（以前一根K线收盘价作为结算价）
+            if limit_mgr and idx > 0:
+                prev_close = df.iloc[idx - 1]['close']
+                limit_mgr.update_limit_price(symbol, prev_close)
 
             # 记录权益
             if position != 0:
@@ -218,6 +178,14 @@ class BacktestEngine:
 
             # 处理信号
             if signal.action in ['buy', 'sell'] and position == 0:
+                # 涨跌停检查
+                if limit_mgr:
+                    is_valid, limit_reason = limit_mgr.check_price_valid(symbol, signal.price)
+                    if not is_valid:
+                        limit_skip_count += 1
+                        logger.debug(f"跳过交易: {symbol} {signal.action} @ {signal.price:.2f} - {limit_reason}")
+                        continue
+
                 # 开仓
                 position = 1 if signal.action == 'buy' else -1
                 entry_price = signal.price
@@ -238,6 +206,20 @@ class BacktestEngine:
                 strategy.entry_time = entry_time
 
             elif signal.action in ['close', 'close_long', 'close_short'] and position != 0:
+                # 涨跌停检查（平仓时也需要检查，涨跌停可能无法成交）
+                if limit_mgr:
+                    is_valid, limit_reason = limit_mgr.check_price_valid(symbol, signal.price)
+                    if not is_valid:
+                        # 平仓受阻，记录警告但不跳过（可能需要强制平仓）
+                        logger.warning(f"平仓价格受涨跌停限制: {symbol} @ {signal.price:.2f} - {limit_reason}")
+                        # 使用涨跌停价格替代
+                        info = limit_mgr.get_limit_price(symbol)
+                        if info:
+                            if signal.price > info.limit_up:
+                                signal.price = info.limit_up
+                            elif signal.price < info.limit_down:
+                                signal.price = info.limit_down
+
                 # 平仓
                 exit_price = signal.price
 
@@ -284,6 +266,14 @@ class BacktestEngine:
 
             # 处理反手信号
             if signal.action == 'buy' and position == -1:
+                # 涨跌停检查
+                if limit_mgr:
+                    is_valid, limit_reason = limit_mgr.check_price_valid(symbol, signal.price)
+                    if not is_valid:
+                        limit_skip_count += 1
+                        logger.debug(f"跳过反手: {symbol} {signal.action} @ {signal.price:.2f} - {limit_reason}")
+                        continue
+
                 # 先平空
                 exit_price = signal.price
                 pnl = (entry_price - exit_price) * volume * multiplier
@@ -326,6 +316,14 @@ class BacktestEngine:
                 strategy.entry_price = entry_price
 
             elif signal.action == 'sell' and position == 1:
+                # 涨跌停检查
+                if limit_mgr:
+                    is_valid, limit_reason = limit_mgr.check_price_valid(symbol, signal.price)
+                    if not is_valid:
+                        limit_skip_count += 1
+                        logger.debug(f"跳过反手: {symbol} {signal.action} @ {signal.price:.2f} - {limit_reason}")
+                        continue
+
                 # 先平多
                 exit_price = signal.price
                 pnl = (exit_price - entry_price) * volume * multiplier
@@ -414,6 +412,10 @@ class BacktestEngine:
 
         logger.info(f"回测完成: 总收益={result.total_return:.2%}, "
                     f"交易次数={result.total_trades}, 胜率={result.win_rate:.2%}")
+
+        # 涨跌停统计
+        if limit_skip_count > 0:
+            logger.info(f"涨跌停限制: 跳过 {limit_skip_count} 次交易信号")
 
         return result
 
