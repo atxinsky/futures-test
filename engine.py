@@ -313,7 +313,7 @@ def _calculate_statistics(
 
     result = BacktestResult(
         symbol=symbol,
-        strategy=strategy_name,
+        strategy_name=strategy_name,
         start_date=df['time'].min(),
         end_date=df['time'].max(),
         initial_capital=initial_capital,
