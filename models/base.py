@@ -34,6 +34,16 @@ class OrderStatus(Enum):
     REJECTED = "rejected"
 
 
+class TradeStatus(Enum):
+    """交易状态（完整生命周期）"""
+    PENDING = "pending"          # 等待开仓
+    OPENING = "opening"          # 开仓中（部分成交）
+    HOLDING = "holding"          # 持仓中
+    CLOSING = "closing"          # 平仓中（部分成交）
+    CLOSED = "closed"            # 已平仓
+    CANCELLED = "cancelled"      # 已取消
+
+
 class OrderType(Enum):
     """订单类型"""
     LIMIT = "limit"
@@ -212,7 +222,7 @@ class Order:
 
 @dataclass
 class Trade:
-    """成交记录"""
+    """成交记录（单笔成交，也称Fill）"""
     trade_id: str
     order_id: str
     symbol: str
@@ -240,6 +250,220 @@ class Trade:
             'volume': self.volume,
             'commission': self.commission,
             'trade_time': self.trade_time.isoformat() if self.trade_time else None
+        }
+
+
+# 别名，向后兼容
+Fill = Trade
+
+
+@dataclass
+class StrategyTrade:
+    """
+    完整交易记录（从开仓到平仓的完整生命周期）
+
+    参考trader-master设计，支持：
+    - 分批建仓（多个开仓订单）
+    - 分批平仓（多个平仓订单）
+    - 加权均价计算
+    - 盈亏追踪
+    - 保证金冻结
+
+    生命周期: PENDING -> OPENING -> HOLDING -> CLOSING -> CLOSED
+    """
+    trade_id: str                           # 交易ID（策略ID+自增序号）
+    strategy_name: str                      # 策略名称
+    symbol: str                             # 合约代码
+    exchange: str = ""                      # 交易所
+
+    direction: Direction = Direction.LONG   # 交易方向
+    status: TradeStatus = TradeStatus.PENDING  # 交易状态
+
+    # 计划与实际手数
+    shares: int = 0                         # 计划总手数
+    filled_shares: int = 0                  # 已开仓成交手数
+    closed_shares: int = 0                  # 已平仓成交手数
+
+    # 价格信息
+    avg_entry_price: float = 0.0            # 加权入场均价
+    avg_exit_price: float = 0.0             # 加权出场均价
+
+    # 盈亏与成本
+    unrealized_pnl: float = 0.0             # 未实现盈亏
+    realized_pnl: float = 0.0               # 已实现盈亏
+    commission: float = 0.0                 # 总手续费
+    frozen_margin: float = 0.0              # 冻结保证金
+
+    # 风控参数
+    stop_loss_price: float = 0.0            # 止损价
+    take_profit_price: float = 0.0          # 止盈价
+
+    # 极值追踪（用于追踪止损）
+    highest_price: float = 0.0              # 持仓期间最高价
+    lowest_price: float = 0.0               # 持仓期间最低价
+
+    # 时间信息
+    create_time: datetime = field(default_factory=datetime.now)
+    open_time: Optional[datetime] = None    # 首笔开仓时间
+    close_time: Optional[datetime] = None   # 全部平仓时间
+
+    # 关联订单（订单ID列表）
+    open_order_ids: List[str] = field(default_factory=list)   # 开仓订单
+    close_order_ids: List[str] = field(default_factory=list)  # 平仓订单
+
+    # 成交明细（Fill列表）
+    fills: List[Trade] = field(default_factory=list)
+
+    # 信号来源
+    signal_id: str = ""                     # 原始信号ID
+    entry_tag: str = ""                     # 入场标签
+    exit_tag: str = ""                      # 出场标签
+
+    @property
+    def holding_shares(self) -> int:
+        """当前持仓手数"""
+        return self.filled_shares - self.closed_shares
+
+    @property
+    def is_active(self) -> bool:
+        """是否活跃（未完全平仓）"""
+        return self.status not in [TradeStatus.CLOSED, TradeStatus.CANCELLED]
+
+    @property
+    def is_fully_filled(self) -> bool:
+        """开仓是否完全成交"""
+        return self.filled_shares >= self.shares
+
+    @property
+    def is_fully_closed(self) -> bool:
+        """是否完全平仓"""
+        return self.closed_shares >= self.filled_shares and self.filled_shares > 0
+
+    @property
+    def holding_duration(self) -> Optional[float]:
+        """持仓时长（小时）"""
+        if not self.open_time:
+            return None
+        end = self.close_time or datetime.now()
+        return (end - self.open_time).total_seconds() / 3600
+
+    def add_fill(self, fill: Trade, multiplier: float = 1.0) -> None:
+        """
+        添加成交记录并更新状态
+
+        Args:
+            fill: 成交记录
+            multiplier: 合约乘数（用于盈亏计算）
+        """
+        self.fills.append(fill)
+        self.commission += fill.commission
+
+        if fill.offset == Offset.OPEN:
+            # 开仓成交 - 更新加权入场均价
+            total_value = self.avg_entry_price * self.filled_shares + fill.price * fill.volume
+            self.filled_shares += fill.volume
+            if self.filled_shares > 0:
+                self.avg_entry_price = total_value / self.filled_shares
+
+            # 记录首笔开仓时间
+            if self.open_time is None:
+                self.open_time = fill.trade_time
+                self.highest_price = fill.price
+                self.lowest_price = fill.price
+
+            # 更新状态
+            if self.filled_shares >= self.shares:
+                self.status = TradeStatus.HOLDING
+            else:
+                self.status = TradeStatus.OPENING
+
+        else:
+            # 平仓成交 - 更新加权出场均价
+            total_value = self.avg_exit_price * self.closed_shares + fill.price * fill.volume
+            prev_closed = self.closed_shares
+            self.closed_shares += fill.volume
+            if self.closed_shares > 0:
+                self.avg_exit_price = total_value / self.closed_shares
+
+            # 计算本次平仓的已实现盈亏
+            if self.direction == Direction.LONG:
+                pnl = (fill.price - self.avg_entry_price) * fill.volume * multiplier
+            else:
+                pnl = (self.avg_entry_price - fill.price) * fill.volume * multiplier
+            self.realized_pnl += pnl
+
+            # 更新状态
+            if self.closed_shares >= self.filled_shares:
+                self.status = TradeStatus.CLOSED
+                self.close_time = fill.trade_time
+                self.unrealized_pnl = 0  # 全部平仓，未实现盈亏归零
+            else:
+                self.status = TradeStatus.CLOSING
+
+    def update_price(self, current_price: float, multiplier: float = 1.0) -> None:
+        """
+        更新当前价格，计算未实现盈亏
+
+        Args:
+            current_price: 当前价格
+            multiplier: 合约乘数
+        """
+        # 更新极值
+        if current_price > self.highest_price:
+            self.highest_price = current_price
+        if current_price < self.lowest_price or self.lowest_price == 0:
+            self.lowest_price = current_price
+
+        # 计算未实现盈亏（只计算未平仓部分）
+        holding = self.holding_shares
+        if holding > 0:
+            if self.direction == Direction.LONG:
+                self.unrealized_pnl = (current_price - self.avg_entry_price) * holding * multiplier
+            else:
+                self.unrealized_pnl = (self.avg_entry_price - current_price) * holding * multiplier
+
+    @property
+    def total_pnl(self) -> float:
+        """总盈亏（已实现+未实现-手续费）"""
+        return self.realized_pnl + self.unrealized_pnl - self.commission
+
+    @property
+    def return_rate(self) -> float:
+        """收益率"""
+        if self.frozen_margin > 0:
+            return self.total_pnl / self.frozen_margin
+        return 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            'trade_id': self.trade_id,
+            'strategy_name': self.strategy_name,
+            'symbol': self.symbol,
+            'direction': self.direction.value,
+            'status': self.status.value,
+            'shares': self.shares,
+            'filled_shares': self.filled_shares,
+            'closed_shares': self.closed_shares,
+            'holding_shares': self.holding_shares,
+            'avg_entry_price': self.avg_entry_price,
+            'avg_exit_price': self.avg_exit_price,
+            'unrealized_pnl': self.unrealized_pnl,
+            'realized_pnl': self.realized_pnl,
+            'total_pnl': self.total_pnl,
+            'commission': self.commission,
+            'frozen_margin': self.frozen_margin,
+            'stop_loss_price': self.stop_loss_price,
+            'take_profit_price': self.take_profit_price,
+            'highest_price': self.highest_price,
+            'lowest_price': self.lowest_price,
+            'create_time': self.create_time.isoformat() if self.create_time else None,
+            'open_time': self.open_time.isoformat() if self.open_time else None,
+            'close_time': self.close_time.isoformat() if self.close_time else None,
+            'holding_duration': self.holding_duration,
+            'return_rate': self.return_rate,
+            'entry_tag': self.entry_tag,
+            'exit_tag': self.exit_tag,
+            'fills_count': len(self.fills)
         }
 
 

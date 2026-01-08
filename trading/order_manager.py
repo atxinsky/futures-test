@@ -15,13 +15,22 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.base import (
-    Signal, SignalAction, OrderRequest, Order, Trade,
+    Signal, SignalAction, OrderRequest, Order, Trade, StrategyTrade, TradeStatus,
     Direction, Offset, OrderType, OrderStatus, EventType, Event
 )
 from core.event_engine import EventEngine
 from gateway.base_gateway import BaseGateway
 
 logger = logging.getLogger(__name__)
+
+# 延迟导入避免循环依赖
+TradeManager = None
+def _get_trade_manager_class():
+    global TradeManager
+    if TradeManager is None:
+        from trading.trade_manager import TradeManager as TM
+        TradeManager = TM
+    return TradeManager
 
 
 class StopOrder:
@@ -57,9 +66,10 @@ class OrderManager:
     6. 追踪止损
     """
 
-    def __init__(self, event_engine: EventEngine, gateway: BaseGateway):
+    def __init__(self, event_engine: EventEngine, gateway: BaseGateway, trade_manager=None):
         self.event_engine = event_engine
         self.gateway = gateway
+        self.trade_manager = trade_manager  # 可选的TradeManager联动
 
         # 订单存储
         self.orders: Dict[str, Order] = {}
@@ -86,6 +96,10 @@ class OrderManager:
         self.event_engine.register(EventType.TRADE, self._on_trade_event)
         self.event_engine.register(EventType.TICK, self._on_tick_event)
         self.event_engine.register(EventType.BAR, self._on_bar_event)
+
+    def set_trade_manager(self, trade_manager) -> None:
+        """设置TradeManager（支持后期注入）"""
+        self.trade_manager = trade_manager
 
     def send_order_from_signal(self, signal: Signal, symbol: str, exchange: str = "") -> Optional[str]:
         """
@@ -238,6 +252,197 @@ class OrderManager:
             'total_trades': len(self.trades),
             'active_stop_orders': len([s for s in self.stop_orders.values() if not s.triggered])
         }
+
+    # ========== StrategyTrade联动功能 ==========
+
+    def open_trade(
+        self,
+        strategy_name: str,
+        symbol: str,
+        direction: Direction,
+        price: float,
+        volume: int,
+        exchange: str = "",
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        entry_tag: str = ""
+    ) -> Optional[StrategyTrade]:
+        """
+        创建交易并发送开仓订单（与TradeManager联动）
+
+        Args:
+            strategy_name: 策略名称
+            symbol: 合约代码
+            direction: 方向
+            price: 价格
+            volume: 手数
+            exchange: 交易所
+            stop_loss: 止损价
+            take_profit: 止盈价
+            entry_tag: 入场标签
+
+        Returns:
+            创建的StrategyTrade（如果成功）
+        """
+        if not self.trade_manager:
+            logger.warning("未设置TradeManager，使用send_order代替")
+            # 降级为普通订单
+            request = OrderRequest(
+                symbol=symbol,
+                exchange=exchange,
+                direction=direction,
+                offset=Offset.OPEN,
+                order_type=OrderType.LIMIT,
+                price=price,
+                volume=volume,
+                strategy_name=strategy_name
+            )
+            self.send_order(request)
+            return None
+
+        # 创建StrategyTrade
+        trade = self.trade_manager.create_trade(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            direction=direction,
+            shares=volume,
+            exchange=exchange,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            entry_tag=entry_tag
+        )
+
+        # 发送开仓订单
+        request = OrderRequest(
+            symbol=symbol,
+            exchange=exchange,
+            direction=direction,
+            offset=Offset.OPEN,
+            order_type=OrderType.LIMIT,
+            price=price,
+            volume=volume,
+            strategy_name=strategy_name,
+            signal_id=trade.trade_id
+        )
+
+        order_id = self.gateway.send_order(request)
+
+        if order_id:
+            self.trade_manager.add_open_order(trade.trade_id, order_id)
+            logger.info(f"开仓订单已发送: {trade.trade_id} -> {order_id}")
+
+            # 设置自动止损/止盈
+            if stop_loss > 0:
+                self.set_stop_loss(symbol, direction, stop_loss, volume, strategy_name)
+            if take_profit > 0:
+                self.set_take_profit(symbol, direction, take_profit, volume, strategy_name)
+        else:
+            logger.error(f"开仓订单发送失败: {trade.trade_id}")
+            self.trade_manager.cancel_trade(trade.trade_id, "订单发送失败")
+            return None
+
+        return trade
+
+    def close_trade(
+        self,
+        trade_id: str,
+        price: float,
+        volume: int = 0,
+        exit_tag: str = ""
+    ) -> Optional[str]:
+        """
+        平仓指定交易
+
+        Args:
+            trade_id: 交易ID
+            price: 平仓价格
+            volume: 平仓手数（0=全部平仓）
+            exit_tag: 出场标签
+
+        Returns:
+            平仓订单ID
+        """
+        if not self.trade_manager:
+            logger.warning("未设置TradeManager")
+            return None
+
+        trade = self.trade_manager.get_trade(trade_id)
+        if not trade:
+            logger.warning(f"交易不存在: {trade_id}")
+            return None
+
+        if not trade.is_active:
+            logger.warning(f"交易已关闭: {trade_id}")
+            return None
+
+        # 确定平仓数量
+        close_volume = volume if volume > 0 else trade.holding_shares
+        if close_volume <= 0:
+            logger.warning(f"无持仓可平: {trade_id}")
+            return None
+
+        # 设置出场标签
+        if exit_tag:
+            trade.exit_tag = exit_tag
+
+        # 平仓方向与持仓方向相反
+        close_direction = Direction.SHORT if trade.direction == Direction.LONG else Direction.LONG
+
+        request = OrderRequest(
+            symbol=trade.symbol,
+            exchange=trade.exchange,
+            direction=close_direction,
+            offset=Offset.CLOSE,
+            order_type=OrderType.LIMIT,
+            price=price,
+            volume=close_volume,
+            strategy_name=trade.strategy_name,
+            signal_id=trade_id
+        )
+
+        order_id = self.gateway.send_order(request)
+
+        if order_id:
+            self.trade_manager.add_close_order(trade_id, order_id)
+            logger.info(f"平仓订单已发送: {trade_id} -> {order_id} x{close_volume}")
+        else:
+            logger.error(f"平仓订单发送失败: {trade_id}")
+
+        return order_id
+
+    def close_all_trades(self, symbol: str = None, strategy: str = None, price_getter: Callable = None) -> int:
+        """
+        平仓所有活跃交易
+
+        Args:
+            symbol: 按品种过滤
+            strategy: 按策略过滤
+            price_getter: 获取当前价格的函数 (symbol) -> price
+
+        Returns:
+            发送的平仓订单数
+        """
+        if not self.trade_manager:
+            return 0
+
+        trades = self.trade_manager.get_active_trades(symbol, strategy)
+        count = 0
+
+        for trade in trades:
+            if trade.holding_shares <= 0:
+                continue
+
+            # 获取平仓价格
+            if price_getter:
+                price = price_getter(trade.symbol)
+            else:
+                price = self.last_prices.get(trade.symbol, trade.avg_entry_price)
+
+            if self.close_trade(trade.trade_id, price):
+                count += 1
+
+        logger.info(f"批量平仓: {count}笔")
+        return count
 
     # ========== 止损/止盈功能 ==========
 

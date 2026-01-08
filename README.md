@@ -16,6 +16,7 @@
 - **Position Manager**: 持仓管理与盈亏计算
 - **Risk Manager**: 风险控制与合规检查
 - **Account Manager**: 账户资金与绩效统计
+- **Trade Manager**: 完整交易生命周期管理（分批建仓/平仓）
 
 ### Data Support
 - **TianQin Integration**: 天勤数据接口
@@ -79,7 +80,8 @@ futures-backtest/
 │   ├── order_manager.py   # 订单管理
 │   ├── position_manager.py# 持仓管理
 │   ├── risk_manager.py    # 风控管理
-│   └── account_manager.py # 账户管理
+│   ├── account_manager.py # 账户管理
+│   └── trade_manager.py   # 交易生命周期管理
 ├── strategies/             # 策略模块
 │   ├── base.py            # 策略基类
 │   ├── wavetrend_final.py # WaveTrend策略
@@ -247,6 +249,21 @@ class MyStrategy(BaseStrategy):
 | Profit Factor | 盈亏比 |
 
 ## Changelog
+
+### v2.1 (2026-01-08)
+- **StrategyTrade Model**: 完整交易生命周期管理
+  - 支持分批建仓（多笔开仓成交自动计算加权入场均价）
+  - 支持分批平仓（多笔平仓成交自动计算盈亏）
+  - 交易状态机：PENDING → OPENING → HOLDING → CLOSING → CLOSED
+  - 极值追踪（持仓期间最高/最低价，用于追踪止损）
+- **TradeManager**: 新增交易管理器
+  - 交易创建与生命周期管理
+  - 成交事件自动处理
+  - 统计功能（胜率、盈亏汇总）
+- **OrderManager增强**:
+  - `open_trade()` 创建交易并发送开仓订单
+  - `close_trade()` 平仓指定交易
+  - `close_all_trades()` 批量平仓
 
 ### v2.0 (2026-01-07)
 - Added live/simulation trading support
