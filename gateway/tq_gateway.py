@@ -26,6 +26,24 @@ from utils.rate_limiter import GatewayRateLimiter
 
 logger = logging.getLogger(__name__)
 
+# 延迟导入订单重试处理器
+_retry_handler = None
+def _get_order_retry_handler():
+    global _retry_handler
+    if _retry_handler is None:
+        try:
+            from utils.order_retry import get_order_retry_handler, OrderRetryConfig
+            config = OrderRetryConfig(
+                max_retries=3,
+                retry_on_limit_price=True,
+                use_limit_price=True,
+                price_offset_ticks=0
+            )
+            _retry_handler = get_order_retry_handler(config)
+        except ImportError:
+            _retry_handler = None
+    return _retry_handler
+
 # 延迟导入订单号生成器
 _order_id_gen = None
 def _get_order_id_generator():
@@ -127,6 +145,10 @@ class TqGateway(BaseGateway):
 
         # 流控器
         self.rate_limiter = GatewayRateLimiter()
+
+        # 智能重报配置
+        self.enable_auto_retry: bool = True  # 是否启用涨跌停自动重报
+        self._pending_retries: Dict[str, dict] = {}  # 待重报的订单信息
 
     def connect(self, config: dict) -> bool:
         """
@@ -680,7 +702,7 @@ class TqGateway(BaseGateway):
             logger.debug(f"持仓更新错误: {e}")
 
     def _update_orders(self):
-        """更新订单状态（线程安全）"""
+        """更新订单状态（线程安全，支持智能重报）"""
         with self._order_lock:
             orders_to_process = list(self.tq_orders.items())
 
@@ -693,11 +715,30 @@ class TqGateway(BaseGateway):
             try:
                 # 检查订单状态
                 if tq_order.status == "FINISHED":
+                    # 获取拒绝/错误消息
+                    reject_msg = getattr(tq_order, 'last_msg', '') or ''
+
                     if tq_order.volume_left == 0:
+                        # 全部成交
                         order.status = OrderStatus.FILLED
                         order.filled_volume = tq_order.volume_orign
                         order.avg_price = tq_order.trade_price if hasattr(tq_order, 'trade_price') else order.price
+
+                        # 标记重试成功
+                        retry_handler = _get_order_retry_handler()
+                        if retry_handler:
+                            retry_handler.record_success(order_id)
+
+                    elif self._is_rejected_order(reject_msg):
+                        # 订单被拒绝
+                        order.status = OrderStatus.REJECTED
+                        order.error_msg = reject_msg
+
+                        # 尝试智能重报
+                        if self.enable_auto_retry:
+                            self._handle_rejected_order(order, reject_msg)
                     else:
+                        # 普通撤销
                         order.status = OrderStatus.CANCELLED
 
                     order.update_time = datetime.now()
@@ -729,6 +770,119 @@ class TqGateway(BaseGateway):
 
             except Exception as e:
                 logger.debug(f"订单状态更新错误: {e}")
+
+    def _is_rejected_order(self, msg: str) -> bool:
+        """判断是否为被拒绝的订单"""
+        if not msg:
+            return False
+        reject_keywords = ['拒绝', 'reject', '失败', 'fail', '错误', 'error',
+                          '涨停', '跌停', 'limit', '超出', '无效']
+        msg_lower = msg.lower()
+        return any(kw in msg_lower for kw in reject_keywords)
+
+    def _handle_rejected_order(self, order: Order, reject_msg: str):
+        """
+        处理被拒绝的订单，尝试智能重报
+
+        Args:
+            order: 被拒绝的订单
+            reject_msg: 拒绝原因
+        """
+        retry_handler = _get_order_retry_handler()
+        if not retry_handler:
+            return
+
+        # 判断是否应该重试
+        should_retry, reason, msg = retry_handler.should_retry(order.order_id, reject_msg)
+
+        if not should_retry:
+            logger.info(f"[订单重报] 跳过 {order.order_id}: {msg}")
+            retry_handler.record_final_fail(order.order_id, msg)
+            return
+
+        # 获取涨跌停价格
+        limit_up, limit_down = self._get_limit_prices(order.symbol)
+        if limit_up <= 0 or limit_down <= 0:
+            logger.warning(f"[订单重报] 无法获取 {order.symbol} 涨跌停价格")
+            return
+
+        # 获取最小变动价位
+        config = self.get_instrument_config(order.symbol)
+        price_tick = config.get('price_tick', 1.0)
+
+        # 计算调整后的价格
+        adjusted_price = retry_handler.calculate_adjusted_price(
+            original_price=order.price,
+            direction=order.direction.value,
+            limit_up=limit_up,
+            limit_down=limit_down,
+            price_tick=price_tick,
+            reason=reason
+        )
+
+        # 如果价格没有变化，不重报
+        if abs(adjusted_price - order.price) < price_tick * 0.5:
+            logger.info(f"[订单重报] 价格无需调整 {order.order_id}")
+            return
+
+        # 创建新订单请求
+        new_request = OrderRequest(
+            symbol=order.symbol,
+            exchange=order.exchange,
+            direction=order.direction,
+            offset=order.offset,
+            order_type=order.order_type,
+            price=adjusted_price,
+            volume=order.volume - order.filled_volume,  # 剩余数量
+            strategy_name=order.strategy_name,
+            signal_id=order.signal_id
+        )
+
+        # 发送新订单
+        new_order_id = self.send_order(new_request)
+
+        if new_order_id:
+            # 记录重试
+            retry_handler.record_retry(
+                original_order_id=order.order_id,
+                new_order_id=new_order_id,
+                original_price=order.price,
+                adjusted_price=adjusted_price,
+                reason=reason
+            )
+            self.on_log(f"[智能重报] {order.symbol} 价格 {order.price:.2f} -> {adjusted_price:.2f}")
+        else:
+            retry_handler.record_final_fail(order.order_id, "重报下单失败")
+
+    def _get_limit_prices(self, symbol: str) -> tuple:
+        """
+        获取品种涨跌停价格
+
+        Args:
+            symbol: 品种代码
+
+        Returns:
+            (涨停价, 跌停价)
+        """
+        # 从行情中获取
+        if symbol in self.quotes:
+            quote = self.quotes[symbol]
+            limit_up = getattr(quote, 'upper_limit', 0) or 0
+            limit_down = getattr(quote, 'lower_limit', 0) or 0
+            if limit_up > 0 and limit_down > 0:
+                return limit_up, limit_down
+
+        # 从缓存管理器获取
+        try:
+            from utils.limit_price import get_limit_price_manager
+            manager = get_limit_price_manager()
+            info = manager.get_limit_price(symbol)
+            if info:
+                return info.limit_up, info.limit_down
+        except ImportError:
+            pass
+
+        return 0, 0
 
     def _sync_orders(self):
         """
