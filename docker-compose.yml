@@ -6,7 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: futures-trading:v2.0
+    image: futures-trading:v2.1
     container_name: futures-web
     ports:
       - "8504:8504"
@@ -39,7 +39,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: futures-trading:v2.0
+    image: futures-trading:v2.1
     container_name: futures-trading
     volumes:
       - ./data:/app/data
@@ -74,7 +74,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: futures-trading:v2.0
+    image: futures-trading:v2.1
     container_name: futures-full
     ports:
       - "8504:8504"
