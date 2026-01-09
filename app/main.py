@@ -63,6 +63,13 @@ try:
 except ImportError:
     HAS_BACKTEST_HISTORY = False
 
+# 多因子选股模块
+try:
+    from app.pages.multifactor import render_multifactor_page
+    HAS_MULTIFACTOR = True
+except ImportError:
+    HAS_MULTIFACTOR = False
+
 # 系统日志模块
 try:
     from app.pages.system_logs import render_system_logs_page
@@ -1239,10 +1246,10 @@ def main():
         st.title("📈 期货量化系统")
         st.markdown("---")
 
-        # 导航 - 9个一级菜单
+        # 导航 - 10个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "期货回测", "股票回测", "回测历史", "系统日志", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "期货回测", "股票回测", "多因子选股", "回测历史", "系统日志", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1291,6 +1298,11 @@ def main():
         render_backtest()
     elif page == "股票回测":
         render_etf_backtest()
+    elif page == "多因子选股":
+        if HAS_MULTIFACTOR:
+            render_multifactor_page()
+        else:
+            st.error("多因子选股模块未加载，请检查依赖: pip install lightgbm akshare")
     elif page == "回测历史":
         if HAS_BACKTEST_HISTORY:
             render_backtest_history_page()
