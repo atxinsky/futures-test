@@ -270,8 +270,8 @@ def _render_futures_optimizer():
         st.markdown("#### 高级设置")
 
         initial_capital = st.number_input("初始资金", 50000, 1000000, 100000, 10000, key="fut_capital")
-        min_trades = st.number_input("最少交易次数", 5, 50, 15, 5, key="fut_min_trades")
-        max_drawdown = st.slider("最大回撤限制", 0.20, 0.50, 0.35, 0.05, key="fut_max_dd")
+        min_trades = st.number_input("最少交易次数", 1, 50, 5, 1, key="fut_min_trades")
+        max_drawdown = st.slider("最大回撤限制", 0.20, 0.60, 0.40, 0.05, key="fut_max_dd")
 
         st.markdown("---")
         st.caption("**提示：** 期货优化可能较慢，建议先用少量品种测试")
