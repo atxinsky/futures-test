@@ -371,3 +371,51 @@ def get_data_loader(data_dir: str = None) -> DataLoader:
     if _data_loader is None:
         _data_loader = DataLoader(data_dir)
     return _data_loader
+
+
+def load_futures_data(symbol: str, start_date: str = None, end_date: str = None, period: str = '1d') -> Optional[pd.DataFrame]:
+    """
+    便捷函数：加载期货数据
+
+    Args:
+        symbol: 品种代码（如 RB, I, MA）
+        start_date: 开始日期，字符串格式 'YYYY-MM-DD'
+        end_date: 结束日期，字符串格式 'YYYY-MM-DD'
+        period: K线周期，默认 '1d'
+
+    Returns:
+        DataFrame，索引为日期时间
+    """
+    loader = get_data_loader()
+
+    # 转换日期
+    start_dt = None
+    end_dt = None
+    if start_date:
+        if isinstance(start_date, str):
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        else:
+            start_dt = start_date
+    if end_date:
+        if isinstance(end_date, str):
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        else:
+            end_dt = end_date
+
+    df = loader.load_bars(symbol, period, start_dt, end_dt)
+
+    if df is not None and not df.empty:
+        # 确保索引是日期时间类型
+        if 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'])
+            df.set_index('time', inplace=True)
+        elif 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+
+        # 按索引排序
+        df.sort_index(inplace=True)
+
+    return df

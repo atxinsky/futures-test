@@ -203,23 +203,527 @@ def _render_etf_optimizer():
 
 def _render_futures_optimizer():
     """期货策略优化界面"""
-    st.info("期货策略优化功能开发中，请使用命令行版本: `python optuna_optimizer.py`")
 
-    # 显示现有脚本说明
-    st.markdown("""
-    **现有优化脚本：**
-    - `optuna_optimizer.py` - 期货WaveTrend策略优化
-    - `optuna_etf_v14.py` - ETF BigBrother V14优化
+    # 三列布局
+    col1, col2, col3 = st.columns([1, 1, 1])
 
-    **使用方法：**
-    ```bash
-    cd D:\\期货\\回测改造
-    python optuna_optimizer.py
-    ```
-    """)
+    with col1:
+        st.markdown("#### 优化配置")
+
+        # 策略选择
+        strategy_options = {
+            "Brother2v6 (趋势突破)": "brother2v6",
+            "WaveTrend Final": "wavetrend_final",
+            "EMANew V5": "emanew_v5",
+            "Donchian Trend": "donchian_trend",
+            "Dual MA": "dual_ma",
+        }
+        strategy_display = st.selectbox("选择策略", list(strategy_options.keys()), key="futures_opt_strategy")
+        strategy_key = strategy_options[strategy_display]
+
+        # 品种选择
+        from config import INSTRUMENTS
+        symbols = list(INSTRUMENTS.keys())
+        default_symbols = ["RB", "I", "MA", "TA", "IF"]
+        default_symbols = [s for s in default_symbols if s in symbols]
+
+        selected_symbols = st.multiselect(
+            "选择品种",
+            options=symbols,
+            default=default_symbols[:3],
+            format_func=lambda x: f"{x} - {INSTRUMENTS[x]['name']}",
+            key="futures_opt_symbols"
+        )
+
+        # 时间设置
+        st.write("**训练集**")
+        train_col1, train_col2 = st.columns(2)
+        with train_col1:
+            train_start = st.date_input("开始", value=datetime(2019, 1, 1), key="fut_train_start")
+        with train_col2:
+            train_end = st.date_input("结束", value=datetime(2023, 12, 31), key="fut_train_end")
+
+        st.write("**验证集**")
+        val_col1, val_col2 = st.columns(2)
+        with val_col1:
+            val_start = st.date_input("开始", value=datetime(2024, 1, 1), key="fut_val_start")
+        with val_col2:
+            val_end = st.date_input("结束", value=datetime.now(), key="fut_val_end")
+
+        # 优化轮数
+        n_trials = st.slider("优化轮数", 20, 200, 50, 10, key="fut_n_trials")
+
+        # 优化目标
+        opt_target = st.selectbox(
+            "优化目标",
+            ["sharpe", "calmar", "return", "sortino"],
+            format_func=lambda x: {"sharpe": "夏普比率", "calmar": "卡玛比率",
+                                   "return": "总收益率", "sortino": "索提诺比率"}[x],
+            key="fut_opt_target"
+        )
+
+    with col2:
+        st.markdown("#### 参数搜索空间")
+        param_space = _get_futures_param_space(strategy_key)
+
+    with col3:
+        st.markdown("#### 高级设置")
+
+        initial_capital = st.number_input("初始资金", 50000, 1000000, 100000, 10000, key="fut_capital")
+        min_trades = st.number_input("最少交易次数", 5, 50, 15, 5, key="fut_min_trades")
+        max_drawdown = st.slider("最大回撤限制", 0.20, 0.50, 0.35, 0.05, key="fut_max_dd")
+
+        st.markdown("---")
+        st.caption("**提示：** 期货优化可能较慢，建议先用少量品种测试")
+
+    st.markdown("---")
+
+    # 运行按钮
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        run_btn = st.button("🚀 开始优化", type="primary", use_container_width=True, key="fut_run_opt")
+
+    if run_btn:
+        if not selected_symbols:
+            st.error("请至少选择一个品种")
+            return
+
+        _run_futures_optimization(
+            strategy_key=strategy_key,
+            strategy_display=strategy_display,
+            symbols=selected_symbols,
+            train_start=train_start.strftime("%Y-%m-%d"),
+            train_end=train_end.strftime("%Y-%m-%d"),
+            val_start=val_start.strftime("%Y-%m-%d"),
+            val_end=val_end.strftime("%Y-%m-%d"),
+            n_trials=n_trials,
+            opt_target=opt_target,
+            param_space=param_space,
+            initial_capital=initial_capital,
+            min_trades=min_trades,
+            max_drawdown=max_drawdown
+        )
 
     # 显示历史优化结果
     _show_optimization_history("期货")
+
+
+def _get_futures_param_space(strategy_key: str) -> dict:
+    """根据策略生成参数搜索空间UI"""
+    param_space = {}
+
+    if strategy_key == "brother2v6":
+        st.write("**趋势参数**")
+        sml_len = st.slider("短期EMA范围", 8, 18, (10, 15), 1, key="b6_sml")
+        big_len = st.slider("长期EMA范围", 35, 70, (45, 55), 5, key="b6_big")
+        break_len = st.slider("突破周期范围", 20, 45, (25, 35), 5, key="b6_break")
+
+        st.write("**过滤参数**")
+        adx_thres = st.slider("ADX阈值范围", 18.0, 28.0, (20.0, 25.0), 1.0, key="b6_adx")
+        chop_thres = st.slider("CHOP阈值范围", 45.0, 55.0, (48.0, 52.0), 1.0, key="b6_chop")
+        vol_multi = st.slider("放量倍数范围", 1.1, 2.0, (1.2, 1.5), 0.1, key="b6_vol")
+
+        st.write("**止损参数**")
+        stop_n = st.slider("止损ATR倍数", 2.0, 4.5, (2.5, 3.5), 0.5, key="b6_stop")
+
+        param_space = {
+            'sml_len': sml_len, 'big_len': big_len, 'break_len': break_len,
+            'adx_thres': adx_thres, 'chop_thres': chop_thres, 'vol_multi': vol_multi,
+            'stop_n': stop_n
+        }
+
+    elif strategy_key == "wavetrend_final":
+        st.write("**WaveTrend参数**")
+        n1 = st.slider("通道长度范围", 5, 20, (8, 15), 1, key="wt_n1")
+        n2 = st.slider("平均长度范围", 10, 30, (15, 25), 1, key="wt_n2")
+        ob_level = st.slider("超买阈值范围", 40, 70, (50, 65), 5, key="wt_ob")
+        os_level = st.slider("超卖阈值范围", -70, -40, (-60, -45), 5, key="wt_os")
+
+        st.write("**止损参数**")
+        atr_mult = st.slider("ATR倍数范围", 1.5, 5.0, (2.0, 3.5), 0.5, key="wt_atr")
+
+        param_space = {
+            'n1': n1, 'n2': n2, 'ob_level': ob_level, 'os_level': os_level,
+            'atr_mult': atr_mult
+        }
+
+    elif strategy_key == "emanew_v5":
+        st.write("**EMA参数**")
+        fast_len = st.slider("快线周期范围", 5, 15, (8, 12), 1, key="ema_fast")
+        slow_len = st.slider("慢线周期范围", 20, 50, (25, 40), 5, key="ema_slow")
+
+        st.write("**过滤参数**")
+        adx_thres = st.slider("ADX阈值范围", 15.0, 30.0, (18.0, 25.0), 1.0, key="ema_adx")
+
+        st.write("**止损参数**")
+        atr_mult = st.slider("ATR倍数范围", 1.5, 4.0, (2.0, 3.0), 0.5, key="ema_atr")
+
+        param_space = {
+            'fast_len': fast_len, 'slow_len': slow_len,
+            'adx_thres': adx_thres, 'atr_mult': atr_mult
+        }
+
+    elif strategy_key == "donchian_trend":
+        st.write("**通道参数**")
+        high_period = st.slider("突破周期范围", 10, 40, (15, 30), 5, key="dc_high")
+        low_period = st.slider("跌破周期范围", 5, 25, (8, 15), 2, key="dc_low")
+
+        st.write("**止损参数**")
+        atr_mult = st.slider("ATR倍数范围", 1.5, 4.0, (2.0, 3.0), 0.5, key="dc_atr")
+
+        param_space = {
+            'high_period': high_period, 'low_period': low_period,
+            'atr_mult': atr_mult
+        }
+
+    elif strategy_key == "dual_ma":
+        st.write("**均线参数**")
+        fast_period = st.slider("快线周期范围", 5, 20, (8, 15), 1, key="ma_fast")
+        slow_period = st.slider("慢线周期范围", 20, 60, (30, 50), 5, key="ma_slow")
+
+        st.write("**止损参数**")
+        stop_pct = st.slider("止损比例范围(%)", 2.0, 8.0, (3.0, 6.0), 0.5, key="ma_stop")
+
+        param_space = {
+            'fast_period': fast_period, 'slow_period': slow_period,
+            'stop_pct': stop_pct
+        }
+
+    else:
+        st.warning("该策略暂未配置参数空间")
+
+    return param_space
+
+
+def _run_futures_optimization(strategy_key, strategy_display, symbols, train_start, train_end,
+                               val_start, val_end, n_trials, opt_target, param_space,
+                               initial_capital, min_trades, max_drawdown):
+    """运行期货参数优化"""
+    import optuna
+
+    # 进度显示
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    log_container = st.empty()
+
+    logs = []
+
+    def log(msg):
+        logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        log_container.code("\n".join(logs[-10:]))
+
+    log(f"开始优化: {strategy_display}")
+    log(f"品种: {', '.join(symbols)}")
+    log(f"训练集: {train_start} ~ {train_end}")
+    log(f"优化轮数: {n_trials}")
+
+    # 加载数据
+    status_text.text("加载数据...")
+    try:
+        from core.backtest_engine import BacktestEngine
+        from utils.data_loader import load_futures_data
+
+        all_data = {}
+        for symbol in symbols:
+            df = load_futures_data(symbol, train_start, val_end)
+            if df is not None and len(df) > 0:
+                all_data[symbol] = df
+                log(f"加载: {symbol} - {len(df)}行")
+
+        if not all_data:
+            st.error("无法加载数据，请检查数据源")
+            return
+
+    except Exception as e:
+        st.error(f"数据加载失败: {e}")
+        logger.exception("数据加载失败")
+        return
+
+    # 获取策略类
+    try:
+        strategy_class = _get_strategy_class(strategy_key)
+        if strategy_class is None:
+            st.error(f"无法加载策略: {strategy_key}")
+            return
+    except Exception as e:
+        st.error(f"策略加载失败: {e}")
+        return
+
+    # 定义目标函数
+    trial_results = []
+
+    def objective(trial):
+        # 构建参数
+        params = {}
+        for param_name, (low, high) in param_space.items():
+            if isinstance(low, int):
+                params[param_name] = trial.suggest_int(param_name, low, high)
+            else:
+                step = round((high - low) / 10, 2)
+                if step < 0.01:
+                    step = 0.01
+                params[param_name] = trial.suggest_float(param_name, low, high, step=step)
+
+        # 多品种综合回测
+        total_sharpe = 0
+        total_return = 0
+        total_trades = 0
+        max_dd = 0
+        valid_count = 0
+
+        for symbol, df in all_data.items():
+            try:
+                # 筛选训练集时间范围
+                train_df = df[(df.index >= train_start) & (df.index <= train_end)]
+                if len(train_df) < 100:
+                    continue
+
+                strategy = strategy_class(params=params)
+                engine = BacktestEngine()
+                result = engine.run(
+                    strategy=strategy,
+                    symbol=symbol,
+                    data=train_df,
+                    initial_capital=initial_capital,
+                    check_limit_price=False
+                )
+
+                if result and result.total_trades > 0:
+                    total_sharpe += result.sharpe_ratio or 0
+                    total_return += result.total_return or 0
+                    total_trades += result.total_trades or 0
+                    max_dd = max(max_dd, result.max_drawdown or 0)
+                    valid_count += 1
+
+            except Exception as e:
+                logger.warning(f"回测 {symbol} 失败: {e}")
+                continue
+
+        if valid_count == 0:
+            return -999
+
+        avg_sharpe = total_sharpe / valid_count
+        avg_return = total_return / valid_count
+
+        # 惩罚条件
+        if total_trades < min_trades:
+            return -999
+        if max_dd > max_drawdown:
+            return -999
+
+        # 记录结果
+        trial_results.append({
+            'trial': trial.number,
+            'params': params.copy(),
+            'sharpe': avg_sharpe,
+            'return': avg_return,
+            'drawdown': max_dd,
+            'trades': total_trades
+        })
+
+        # 返回目标值
+        if opt_target == 'sharpe':
+            return avg_sharpe
+        elif opt_target == 'calmar':
+            return avg_return / max_dd if max_dd > 0 else avg_return
+        elif opt_target == 'return':
+            return avg_return
+        else:
+            return avg_sharpe
+
+    # 创建Study
+    status_text.text("创建优化器...")
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+
+    # 运行优化
+    status_text.text("开始优化...")
+
+    def callback(study, trial):
+        progress = (trial.number + 1) / n_trials
+        progress_bar.progress(progress)
+        if trial.value and trial.value > -900:
+            log(f"Trial {trial.number}: {opt_target}={trial.value:.3f}")
+
+    try:
+        study.optimize(objective, n_trials=n_trials, callbacks=[callback], show_progress_bar=False)
+    except Exception as e:
+        st.error(f"优化失败: {e}")
+        logger.exception("优化失败")
+        return
+
+    progress_bar.progress(1.0)
+    status_text.text("优化完成!")
+    log("优化完成!")
+
+    # 获取最优参数
+    best_params = study.best_params
+    best_value = study.best_value
+
+    st.success(f"最优{opt_target}: {best_value:.3f}")
+
+    # 显示最优参数
+    st.markdown("#### 最优参数")
+    params_df = pd.DataFrame([
+        {"参数": k, "最优值": f"{v:.4f}" if isinstance(v, float) else str(v)}
+        for k, v in best_params.items()
+    ])
+    st.dataframe(params_df, hide_index=True, use_container_width=True)
+
+    # 验证集测试
+    st.markdown("#### 验证集测试")
+    _validate_futures_params(strategy_class, best_params, all_data, train_start, train_end, val_start, val_end, initial_capital)
+
+    # 参数重要性
+    st.markdown("#### 参数重要性")
+    try:
+        importances = optuna.importance.get_param_importances(study)
+        imp_df = pd.DataFrame([
+            {"参数": k, "重要性": v}
+            for k, v in sorted(importances.items(), key=lambda x: -x[1])
+        ])
+
+        fig = go.Figure(go.Bar(
+            x=imp_df['重要性'],
+            y=imp_df['参数'],
+            orientation='h',
+            marker_color='#1f77b4'
+        ))
+        fig.update_layout(height=300, margin=dict(l=100, r=50, t=30, b=30))
+        st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.warning(f"无法计算参数重要性: {e}")
+
+    # 优化过程图
+    st.markdown("#### 优化收敛过程")
+    if trial_results:
+        results_df = pd.DataFrame(trial_results)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'],
+            y=results_df['sharpe'],
+            mode='markers+lines',
+            name='Sharpe',
+            marker=dict(size=6)
+        ))
+        cummax = results_df['sharpe'].cummax()
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'],
+            y=cummax,
+            mode='lines',
+            name='累计最优',
+            line=dict(color='red', dash='dash')
+        ))
+        fig.update_layout(height=300, xaxis_title='Trial', yaxis_title='Sharpe')
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 保存结果
+    _save_optimization_result(
+        opt_type="期货",
+        strategy=strategy_display,
+        best_params=best_params,
+        best_value=best_value,
+        opt_target=opt_target,
+        n_trials=n_trials,
+        train_range=f"{train_start}~{train_end}",
+        val_range=f"{val_start}~{val_end}"
+    )
+
+
+def _get_strategy_class(strategy_key: str):
+    """根据key获取策略类"""
+    try:
+        if strategy_key == "brother2v6":
+            from strategies.brother2v6 import Brother2v6Strategy
+            return Brother2v6Strategy
+        elif strategy_key == "wavetrend_final":
+            from strategies.wavetrend_final import WaveTrendFinalStrategy
+            return WaveTrendFinalStrategy
+        elif strategy_key == "emanew_v5":
+            from strategies.emanew_v5 import EMANewV5Strategy
+            return EMANewV5Strategy
+        elif strategy_key == "donchian_trend":
+            from strategies.donchian_trend import DonchianTrendStrategy
+            return DonchianTrendStrategy
+        elif strategy_key == "dual_ma":
+            from strategies.dual_ma import DualMAStrategy
+            return DualMAStrategy
+        else:
+            return None
+    except ImportError as e:
+        logger.warning(f"策略导入失败: {e}")
+        return None
+
+
+def _validate_futures_params(strategy_class, params, all_data, train_start, train_end, val_start, val_end, initial_capital):
+    """验证集测试"""
+    from core.backtest_engine import BacktestEngine
+
+    results = {}
+
+    for period_name, start, end in [("训练集", train_start, train_end), ("验证集", val_start, val_end)]:
+        total_sharpe = 0
+        total_return = 0
+        max_dd = 0
+        total_trades = 0
+        valid_count = 0
+
+        for symbol, df in all_data.items():
+            try:
+                period_df = df[(df.index >= start) & (df.index <= end)]
+                if len(period_df) < 50:
+                    continue
+
+                strategy = strategy_class(params=params)
+                engine = BacktestEngine()
+                result = engine.run(
+                    strategy=strategy,
+                    symbol=symbol,
+                    data=period_df,
+                    initial_capital=initial_capital
+                )
+
+                if result:
+                    total_sharpe += result.sharpe_ratio or 0
+                    total_return += result.total_return or 0
+                    max_dd = max(max_dd, result.max_drawdown or 0)
+                    total_trades += result.total_trades or 0
+                    valid_count += 1
+
+            except Exception as e:
+                logger.warning(f"{period_name} {symbol} 测试失败: {e}")
+
+        if valid_count > 0:
+            results[period_name] = {
+                'sharpe': total_sharpe / valid_count,
+                'return': total_return / valid_count,
+                'drawdown': max_dd,
+                'trades': total_trades
+            }
+
+    if results.get("训练集") and results.get("验证集"):
+        train = results["训练集"]
+        val = results["验证集"]
+
+        decay = (train['sharpe'] - val['sharpe']) / train['sharpe'] * 100 if train['sharpe'] > 0 else 0
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("训练集Sharpe", f"{train['sharpe']:.3f}")
+            st.metric("训练集收益", f"{train['return']*100:.1f}%")
+        with col2:
+            st.metric("验证集Sharpe", f"{val['sharpe']:.3f}")
+            st.metric("验证集收益", f"{val['return']*100:.1f}%")
+        with col3:
+            if decay > 40:
+                st.error(f"衰减: {decay:.1f}% (过拟合风险高)")
+            elif decay > 20:
+                st.warning(f"衰减: {decay:.1f}% (轻度过拟合)")
+            else:
+                st.success(f"衰减: {decay:.1f}% (参数稳健)")
 
 
 def _run_etf_optimization(strategy, train_start, train_end, val_start, val_end,
