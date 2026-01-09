@@ -193,14 +193,14 @@ class ETFBigBrotherV21(ETFBigBrotherV20):
         "516010.SH",  # 游戏动漫
     ]
 
-    # 2026-01-09 Optuna优化后的参数
+    # 2026-01-09 Optuna优化后的参数 (V2 - 放宽仓位)
     PARAMS = {
-        "risk_per_trade": {"name": "单笔风险", "default": 0.008, "min": 0.005, "max": 0.03, "step": 0.002},
-        "max_position": {"name": "最大仓位", "default": 0.20, "min": 0.10, "max": 0.40, "step": 0.05},
-        "donchian_high_period": {"name": "突破周期", "default": 28, "min": 10, "max": 40, "step": 1},
-        "donchian_low_period": {"name": "跌破周期", "default": 14, "min": 5, "max": 25, "step": 1},
+        "risk_per_trade": {"name": "单笔风险", "default": 0.018, "min": 0.005, "max": 0.03, "step": 0.002},
+        "max_position": {"name": "最大仓位", "default": 0.25, "min": 0.10, "max": 0.50, "step": 0.05},
+        "donchian_high_period": {"name": "突破周期", "default": 27, "min": 10, "max": 40, "step": 1},
+        "donchian_low_period": {"name": "跌破周期", "default": 13, "min": 5, "max": 25, "step": 1},
         "atr_period": {"name": "ATR周期", "default": 14, "min": 7, "max": 21, "step": 7},
-        "gap_up_limit": {"name": "高开限制", "default": 0.03, "min": 0.01, "max": 0.05, "step": 0.005},
+        "gap_up_limit": {"name": "高开限制", "default": 0.025, "min": 0.01, "max": 0.05, "step": 0.005},
         "gap_down_limit": {"name": "低开限制", "default": 0.03, "min": 0.02, "max": 0.05, "step": 0.005},
     }
 
