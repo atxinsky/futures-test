@@ -508,26 +508,27 @@ def render_backtest_overview(result):
     """渲染回测概览页"""
     st.subheader("回测概览")
 
-    # 显示合约规格信息
-    inst = get_instrument(result.symbol)
-    if inst:
-        with st.expander(f"{result.symbol} 合约规格 (回测使用)", expanded=False):
-            cols = st.columns(6)
-            with cols[0]:
-                st.metric("品种", inst['name'])
-            with cols[1]:
-                st.metric("合约乘数", f"{inst['multiplier']}")
-            with cols[2]:
-                st.metric("最小变动", f"{inst['price_tick']}")
-            with cols[3]:
-                st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
-            with cols[4]:
-                if inst['commission_fixed'] > 0:
-                    st.metric("手续费", f"{inst['commission_fixed']}元/手")
-                else:
-                    st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
-            with cols[5]:
-                st.metric("交易所", inst['exchange'])
+    # 显示合约规格信息（仅期货回测有symbol属性）
+    if hasattr(result, 'symbol') and result.symbol:
+        inst = get_instrument(result.symbol)
+        if inst:
+            with st.expander(f"{result.symbol} 合约规格 (回测使用)", expanded=False):
+                cols = st.columns(6)
+                with cols[0]:
+                    st.metric("品种", inst['name'])
+                with cols[1]:
+                    st.metric("合约乘数", f"{inst['multiplier']}")
+                with cols[2]:
+                    st.metric("最小变动", f"{inst['price_tick']}")
+                with cols[3]:
+                    st.metric("保证金率", f"{inst['margin_rate']*100:.0f}%")
+                with cols[4]:
+                    if inst['commission_fixed'] > 0:
+                        st.metric("手续费", f"{inst['commission_fixed']}元/手")
+                    else:
+                        st.metric("手续费率", f"{inst['commission_rate']*10000:.2f}%%")
+                with cols[5]:
+                    st.metric("交易所", inst['exchange'])
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
@@ -1241,7 +1242,7 @@ def main():
         # 导航 - 9个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "ETF回测", "回测历史", "系统日志", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "期货回测", "股票回测", "回测历史", "系统日志", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1286,9 +1287,9 @@ def main():
             st.error("实盘交易模块未加载，请检查依赖")
     elif page == "风控中心":
         render_risk_center()
-    elif page == "回测系统":
+    elif page == "期货回测":
         render_backtest()
-    elif page == "ETF回测":
+    elif page == "股票回测":
         render_etf_backtest()
     elif page == "回测历史":
         if HAS_BACKTEST_HISTORY:
@@ -1364,8 +1365,8 @@ def render_dashboard():
     with col2:
         st.markdown("**策略回测**")
         st.caption("历史数据回测，评估策略表现")
-        if st.button("进入回测系统", use_container_width=True):
-            st.session_state.nav_page = "回测系统"
+        if st.button("进入期货回测", use_container_width=True):
+            st.session_state.nav_page = "期货回测"
             st.rerun()
 
     with col3:
@@ -1387,7 +1388,7 @@ def render_dashboard():
     # 使用说明
     st.subheader("使用流程")
     st.markdown("""
-    1. **回测验证** → 在「回测系统」中测试策略，确认参数
+    1. **回测验证** → 在「期货回测」或「股票回测」中测试策略，确认参数
     2. **模拟交易** → 在「模拟交易」中使用真实行情验证策略
     3. **实盘上线** → 确认无误后，在「实盘交易」中启动真实交易
     """)
@@ -1708,8 +1709,8 @@ def render_risk_center():
 
 
 def render_etf_backtest():
-    """渲染ETF回测系统页面"""
-    st.title("ETF回测系统")
+    """渲染股票回测系统页面"""
+    st.title("股票回测系统")
 
     if not HAS_ETF:
         st.error("ETF模块未加载，请检查依赖: pip install akshare")
@@ -1739,8 +1740,8 @@ def render_etf_backtest():
 
 
 def render_backtest():
-    """渲染回测系统页面 - 完整版"""
-    st.title("回测系统")
+    """渲染期货回测系统页面"""
+    st.title("期货回测系统")
 
     # 回测子页面选择
     backtest_page = st.radio(

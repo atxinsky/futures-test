@@ -136,7 +136,17 @@ def render_etf_backtest_page():
 
     st.markdown("---")
 
-    if st.button("🚀 运行回测", type="primary", use_container_width=True):
+    # 检查是否有已保存的回测结果
+    has_result = 'etf_backtest_result' in st.session_state and st.session_state['etf_backtest_result'] is not None
+
+    col_btn, col_status = st.columns([3, 1])
+    with col_btn:
+        run_clicked = st.button("🚀 运行回测", type="primary", use_container_width=True)
+    with col_status:
+        if has_result:
+            st.success("已有回测结果")
+
+    if run_clicked:
         if not selected_etfs:
             st.error("请至少选择一个ETF")
             return
@@ -151,6 +161,11 @@ def render_etf_backtest_page():
             strategy_params=strategy_params,
             benchmark=benchmark.split(" ")[0]
         )
+    # 页面rerun时，如果session_state中有已保存的回测结果，继续显示
+    elif has_result:
+        result = st.session_state['etf_backtest_result']
+        data = st.session_state.get('etf_backtest_data')
+        _display_etf_result(result, data)
 
 
 def _run_etf_backtest(start_date, end_date, initial_capital, commission,
@@ -168,7 +183,8 @@ def _run_etf_backtest(start_date, end_date, initial_capital, commission,
 
             ds = get_etf_data_service()
 
-            all_codes = selected_etfs + [benchmark, "000300.SH"]
+            # 只加载选中的ETF和基准，不强制加载000300.SH指数
+            all_codes = selected_etfs + [benchmark]
             all_codes = list(set(all_codes))
 
             data = {}
@@ -234,14 +250,14 @@ def _run_etf_backtest(start_date, end_date, initial_capital, commission,
                 data=data,
                 start_date=start_date,
                 end_date=end_date,
-                benchmark_data=data.get(benchmark, data.get("000300.SH"))
+                benchmark_data=data.get(benchmark, data.get("510300.SH"))  # 使用沪深300ETF作为fallback
             )
 
             st.success("回测完成!")
-            # 保存数据到session_state供K线图使用和保存功能
-            st.session_state['backtest_data'] = data
-            st.session_state['backtest_result'] = result
-            st.session_state['backtest_config'] = {
+            # 保存数据到session_state供K线图使用和保存功能（使用etf_前缀避免与期货回测冲突）
+            st.session_state['etf_backtest_data'] = data
+            st.session_state['etf_backtest_result'] = result
+            st.session_state['etf_backtest_config'] = {
                 'strategy_name': strategy_name,
                 'selected_etfs': selected_etfs,
                 'strategy_params': strategy_params
@@ -265,29 +281,34 @@ def _display_etf_result(result, data=None):
         if st.button("💾 保存回测结果", type="primary"):
             _save_backtest_result(notes)
 
-    # 使用tabs组织结果
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["概览", "K线交易图", "资金曲线", "交易记录", "统计分析"])
+    # 使用radio代替tabs，这样可以通过key保持选择状态
+    tab_options = ["概览", "K线交易图", "资金曲线", "交易记录", "统计分析"]
+    selected_tab = st.radio(
+        "结果视图",
+        tab_options,
+        horizontal=True,
+        key="etf_result_tab",
+        label_visibility="collapsed"
+    )
 
-    with tab1:
+    st.markdown("---")
+
+    if selected_tab == "概览":
         _render_overview_tab(result)
-
-    with tab2:
-        _render_kline_trade_chart(result, st.session_state.get('backtest_data'))
-
-    with tab3:
+    elif selected_tab == "K线交易图":
+        _render_kline_trade_chart(result, st.session_state.get('etf_backtest_data'))
+    elif selected_tab == "资金曲线":
         _render_equity_curve_tab(result)
-
-    with tab4:
+    elif selected_tab == "交易记录":
         _render_trades_tab(result)
-
-    with tab5:
+    elif selected_tab == "统计分析":
         _render_statistics_tab(result)
 
 
 def _save_backtest_result(notes: str = ""):
     """保存回测结果到数据库"""
-    result = st.session_state.get('backtest_result')
-    config = st.session_state.get('backtest_config')
+    result = st.session_state.get('etf_backtest_result')
+    config = st.session_state.get('etf_backtest_config')
 
     if not result or not config:
         st.error("没有可保存的回测结果")
