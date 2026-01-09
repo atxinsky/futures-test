@@ -176,18 +176,31 @@ class ETFBigBrotherV20(ETFBigBrotherV17):
 
 
 class ETFBigBrotherV21(ETFBigBrotherV20):
-    """BigBrother V21 防跳空稳健版"""
+    """BigBrother V21 防跳空稳健版 - 2026-01-09优化参数"""
 
     name = "BigBrother_V21"
-    description = "ETF防跳空版 - 使用VWAP+防高开低开"
+    description = "ETF防跳空版 - VWAP+防高开 (优化参数)"
 
+    # V21 优化后的ETF池 (8个标的)
+    DEFAULT_POOL = [
+        "513100.SH",  # 纳指ETF
+        "513050.SH",  # 中概互联
+        "512480.SH",  # 半导体ETF
+        "515030.SH",  # 新能车ETF
+        "518880.SH",  # 黄金ETF
+        "512890.SH",  # 红利低波
+        "588000.SH",  # 科创50
+        "516010.SH",  # 游戏动漫
+    ]
+
+    # 2026-01-09 Optuna优化后的参数
     PARAMS = {
-        "risk_per_trade": {"name": "单笔风险", "default": 0.01, "min": 0.005, "max": 0.03, "step": 0.002},
-        "max_position": {"name": "最大仓位", "default": 0.30, "min": 0.10, "max": 0.40, "step": 0.05},
-        "donchian_high_period": {"name": "突破周期", "default": 20, "min": 10, "max": 30, "step": 5},
-        "donchian_low_period": {"name": "跌破周期", "default": 10, "min": 5, "max": 20, "step": 5},
+        "risk_per_trade": {"name": "单笔风险", "default": 0.008, "min": 0.005, "max": 0.03, "step": 0.002},
+        "max_position": {"name": "最大仓位", "default": 0.20, "min": 0.10, "max": 0.40, "step": 0.05},
+        "donchian_high_period": {"name": "突破周期", "default": 28, "min": 10, "max": 40, "step": 1},
+        "donchian_low_period": {"name": "跌破周期", "default": 14, "min": 5, "max": 25, "step": 1},
         "atr_period": {"name": "ATR周期", "default": 14, "min": 7, "max": 21, "step": 7},
-        "gap_up_limit": {"name": "高开限制", "default": 0.02, "min": 0.01, "max": 0.05, "step": 0.005},
+        "gap_up_limit": {"name": "高开限制", "default": 0.03, "min": 0.01, "max": 0.05, "step": 0.005},
         "gap_down_limit": {"name": "低开限制", "default": 0.03, "min": 0.02, "max": 0.05, "step": 0.005},
     }
 
