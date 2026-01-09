@@ -1,19 +1,14 @@
 # coding=utf-8
 """
-ETF回测引擎 v2.0
-支持T+1开盘执行、涨跌停检查、信号队列等商用级特性
-
-更新日志 (2026-01-09):
-- 新增PendingOrder信号队列，T日信号T+1开盘执行
-- 新增涨跌停检查，无法成交时跳过
-- 成交价改为开盘价+滑点，更贴近实盘
+ETF回测引擎
+支持ETF策略回测、绩效计算、交易记录等
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)
@@ -45,19 +40,6 @@ class ETFTrade:
     reason: str = ""
     pnl: float = 0.0
     pnl_pct: float = 0.0
-    signal_date: str = ""  # 新增：信号产生日期
-
-
-@dataclass
-class PendingOrder:
-    """
-    待执行订单（T+1执行）
-    信号在T日收盘后产生，T+1日开盘执行
-    """
-    code: str
-    target_percent: float  # 目标仓位百分比 (0=清仓)
-    signal_date: str       # 信号产生日期
-    reason: str = ""       # 订单原因
 
 
 @dataclass
@@ -91,15 +73,15 @@ class ETFBacktestResult:
     equity_curve: pd.DataFrame = None
     trades: List[ETFTrade] = None
     positions_history: pd.DataFrame = None
-    skipped_limit_up: int = 0   # 因涨停跳过的买单
-    skipped_limit_down: int = 0 # 因跌停跳过的卖单
 
 
 class ETFBacktestContext:
     """ETF回测上下文"""
 
-    def __init__(self, engine):
+    def __init__(self, engine: 'ETFBacktestEngine'):
         self._engine = engine
+
+        # 策略参数
         self.base_position = 0.18
         self.atr_multiplier = 2.5
         self.max_loss = 0.07
@@ -108,13 +90,17 @@ class ETFBacktestContext:
         self.max_hold = 120
         self.cooldown = 3
         self.adx_threshold = 20
+
+        # 内部状态
         self.cooldown_dict = {}
         self.entry_prices = {}
         self.entry_dates = {}
         self.highest = {}
         self.stops = {}
-        self.overseas = ["513100.SH", "159941.SZ", "518880.SH"]
-        self.high_vol = ["588000.SH", "516010.SH", "512480.SH"]
+
+        # 标的分类
+        self.overseas = ['513100.SH', '159941.SZ', '518880.SH']
+        self.high_vol = ['588000.SH', '516010.SH', '512480.SH']
 
     @property
     def current_date(self) -> str:
@@ -137,44 +123,33 @@ class ETFBacktestContext:
     def get_total_value(self) -> float:
         return self._engine._get_total_value()
 
-    def order_target_percent(self, code: str, target_percent: float, reason: str = ""):
-        """按目标百分比下单（T+1执行）"""
-        self._engine._add_pending_order(code, target_percent, reason)
+    def order_target_percent(self, code: str, target_percent: float):
+        """按目标百分比下单"""
+        self._engine._order_target_percent(code, target_percent)
 
 
 class ETFBacktestEngine:
-    """
-    ETF回测引擎 v2.0
-    核心改进：T+1开盘执行、涨跌停检查、信号队列
-    """
+    """ETF回测引擎"""
 
     def __init__(
         self,
         initial_capital: float = 1000000,
         commission_rate: float = 0.0001,
         slippage: float = 0.0001,
-        benchmark: str = "510300.SH",
-        limit_price_ratio: float = 0.10,
-        enable_t1_execution: bool = True
+        benchmark: str = "510300.SH"
     ):
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
         self.slippage = slippage
         self.benchmark = benchmark
-        self.limit_price_ratio = limit_price_ratio
-        self.enable_t1_execution = enable_t1_execution
 
         self._cash = initial_capital
         self._positions: Dict[str, ETFPosition] = {}
         self._trades: List[ETFTrade] = []
         self._equity_history: List[dict] = []
-        self._pending_orders: Dict[str, PendingOrder] = {}
-        self._skipped_limit_up = 0
-        self._skipped_limit_down = 0
 
         self._current_date = ""
         self._current_data = None
-        self._prev_data = None
         self._all_data: Dict[str, pd.DataFrame] = {}
         self._benchmark_data: pd.DataFrame = None
 
@@ -183,14 +158,14 @@ class ETFBacktestEngine:
         self._context = None
 
     def set_strategy(self, initialize: Callable = None, handle_data: Callable = None):
+        """设置策略函数"""
         self._initialize_func = initialize
         self._handle_data_func = handle_data
 
     def run(self, data: Dict[str, pd.DataFrame], start_date: str, end_date: str,
             benchmark_data: pd.DataFrame = None) -> ETFBacktestResult:
-        logger.info(f"开始ETF回测 v2.0: {start_date} ~ {end_date}")
-        if self.enable_t1_execution:
-            logger.info("启用T+1开盘执行模式")
+        """运行回测"""
+        logger.info(f"开始ETF回测: {start_date} ~ {end_date}")
 
         self._reset()
         self._all_data = data
@@ -200,44 +175,32 @@ class ETFBacktestEngine:
         if self._initialize_func:
             self._initialize_func(self._context)
 
+        # 获取所有交易日期
         all_dates = set()
         for code, df in data.items():
             if "date" in df.columns:
                 all_dates.update(df["date"].tolist())
 
         trading_dates = sorted([d for d in all_dates if start_date <= d <= end_date])
+
         if not trading_dates:
             raise ValueError("没有可用的交易日期")
 
         logger.info(f"交易日期: {len(trading_dates)}天")
 
-        prev_date = None
         for date in trading_dates:
             self._current_date = date
             self._current_data = self._get_daily_data(date)
-            if prev_date:
-                self._prev_data = self._get_daily_data(prev_date)
-            else:
-                self._prev_data = None
-
             self._update_positions_market_value()
-
-            if self.enable_t1_execution and self._pending_orders:
-                self._execute_pending_orders()
 
             if self._handle_data_func and len(self._current_data) > 0:
                 self._handle_data_func(self._context, None)
 
-            if not self.enable_t1_execution and self._pending_orders:
-                self._execute_pending_orders_immediate()
-
             self._record_equity()
-            prev_date = date
 
         result = self._calculate_result(start_date, end_date)
         logger.info(f"ETF回测完成: 总收益 {result.total_return*100:.2f}%")
-        if self._skipped_limit_up > 0 or self._skipped_limit_down > 0:
-            logger.info(f"涨停跳过: {self._skipped_limit_up}次, 跌停跳过: {self._skipped_limit_down}次")
+
         return result
 
     def _reset(self):
@@ -245,9 +208,6 @@ class ETFBacktestEngine:
         self._positions = {}
         self._trades = []
         self._equity_history = []
-        self._pending_orders = {}
-        self._skipped_limit_up = 0
-        self._skipped_limit_down = 0
 
     def _get_daily_data(self, date: str) -> pd.DataFrame:
         rows = []
@@ -276,86 +236,38 @@ class ETFBacktestEngine:
             total += pos.market_value
         return total
 
-    def _get_price(self, code: str, price_type: str = "close") -> Optional[float]:
+    def _get_price(self, code: str) -> Optional[float]:
         if self._current_data is None or len(self._current_data) == 0:
             return None
         row = self._current_data[self._current_data["instrument"] == code]
-        if len(row) > 0 and price_type in row.columns:
-            return row.iloc[0][price_type]
-        return None
-
-    def _get_prev_close(self, code: str) -> Optional[float]:
-        if self._prev_data is None or len(self._prev_data) == 0:
-            return None
-        row = self._prev_data[self._prev_data["instrument"] == code]
         if len(row) > 0:
             return row.iloc[0]["close"]
         return None
 
-    def _calculate_limit_prices(self, code: str) -> tuple:
-        prev_close = self._get_prev_close(code)
-        if prev_close is None:
-            return None, None
-        limit_up = round(prev_close * (1 + self.limit_price_ratio), 3)
-        limit_down = round(prev_close * (1 - self.limit_price_ratio), 3)
-        return limit_up, limit_down
-
-    def _add_pending_order(self, code: str, target_percent: float, reason: str = ""):
-        self._pending_orders[code] = PendingOrder(
-            code=code, target_percent=target_percent,
-            signal_date=self._current_date, reason=reason
-        )
-        logger.debug(f"[{self._current_date}] 信号入队: {code} -> {target_percent:.1%}")
-
-    def _execute_pending_orders(self):
-        if not self._pending_orders:
-            return
-        orders_to_execute = list(self._pending_orders.items())
-        self._pending_orders = {}
-        for code, order in orders_to_execute:
-            self._execute_single_order(order, use_open_price=True)
-
-    def _execute_pending_orders_immediate(self):
-        if not self._pending_orders:
-            return
-        orders_to_execute = list(self._pending_orders.items())
-        self._pending_orders = {}
-        for code, order in orders_to_execute:
-            self._execute_single_order(order, use_open_price=False)
-
-    def _execute_single_order(self, order: PendingOrder, use_open_price: bool = True):
-        code = order.code
-        target_percent = order.target_percent
-        price_type = "open" if use_open_price else "close"
-        price = self._get_price(code, price_type)
-        if price is None:
-            logger.warning(f"[{self._current_date}] 无法获取{code}的{price_type}价格，跳过")
-            return
-
-        limit_up, limit_down = self._calculate_limit_prices(code)
+    def _order_target_percent(self, code: str, target_percent: float):
         total_value = self._get_total_value()
         target_value = total_value * target_percent
+
+        price = self._get_price(code)
+        if price is None:
+            return
+
         current_value = self._positions[code].market_value if code in self._positions else 0
         diff_value = target_value - current_value
 
         if abs(diff_value) < 100:
             return
+
         shares = int(diff_value / price / 100) * 100
 
-        if shares > 0:
-            if limit_up is not None and price >= limit_up:
-                self._skipped_limit_up += 1
-                logger.info(f"[{self._current_date}] {code} 涨停({price:.3f}>={limit_up:.3f})，跳过买入")
-                return
-            self._order_shares_internal(code, shares, price, order.signal_date)
-        elif shares < 0:
-            if limit_down is not None and price <= limit_down:
-                self._skipped_limit_down += 1
-                logger.info(f"[{self._current_date}] {code} 跌停({price:.3f}<={limit_down:.3f})，跳过卖出")
-                return
-            self._order_shares_internal(code, shares, price, order.signal_date)
+        if shares != 0:
+            self._order_shares(code, shares)
 
-    def _order_shares_internal(self, code: str, shares: int, price: float, signal_date: str = ""):
+    def _order_shares(self, code: str, shares: int):
+        price = self._get_price(code)
+        if price is None:
+            return
+
         exec_price = price * (1 + self.slippage) if shares > 0 else price * (1 - self.slippage)
         amount = abs(shares) * exec_price
         commission = max(amount * self.commission_rate, 0.1)
@@ -375,9 +287,13 @@ class ETFBacktestEngine:
 
             if code not in self._positions:
                 self._positions[code] = ETFPosition(
-                    code=code, shares=shares, avg_price=exec_price,
-                    entry_date=self._current_date, entry_price=exec_price,
-                    highest_price=exec_price, market_value=shares * exec_price
+                    code=code,
+                    shares=shares,
+                    avg_price=exec_price,
+                    entry_date=self._current_date,
+                    entry_price=exec_price,
+                    highest_price=exec_price,
+                    market_value=shares * exec_price
                 )
             else:
                 pos = self._positions[code]
@@ -388,10 +304,8 @@ class ETFBacktestEngine:
 
             self._trades.append(ETFTrade(
                 date=self._current_date, code=code, direction="BUY",
-                price=exec_price, shares=shares, amount=amount, commission=commission,
-                signal_date=signal_date
+                price=exec_price, shares=shares, amount=amount, commission=commission
             ))
-            logger.debug(f"[{self._current_date}] 买入 {code} {shares}股 @ {exec_price:.3f}")
 
         elif shares < 0:
             shares = abs(shares)
@@ -413,22 +327,14 @@ class ETFBacktestEngine:
             self._trades.append(ETFTrade(
                 date=self._current_date, code=code, direction="SELL",
                 price=exec_price, shares=shares, amount=amount, commission=commission,
-                pnl=pnl, pnl_pct=pnl_pct, signal_date=signal_date
+                pnl=pnl, pnl_pct=pnl_pct
             ))
-            logger.debug(f"[{self._current_date}] 卖出 {code} {shares}股 @ {exec_price:.3f}, 盈亏:{pnl:+.0f}")
 
             pos.shares -= shares
             pos.market_value = pos.shares * exec_price
+
             if pos.shares <= 0:
                 del self._positions[code]
-
-    def _order_target_percent(self, code: str, target_percent: float):
-        self._add_pending_order(code, target_percent)
-
-    def _order_shares(self, code: str, shares: int):
-        price = self._get_price(code)
-        if price:
-            self._order_shares_internal(code, shares, price, self._current_date)
 
     def _record_equity(self):
         self._equity_history.append({
@@ -436,8 +342,7 @@ class ETFBacktestEngine:
             "cash": self._cash,
             "market_value": sum(p.market_value for p in self._positions.values()),
             "total_value": self._get_total_value(),
-            "positions_count": len(self._positions),
-            "pending_orders": len(self._pending_orders)
+            "positions_count": len(self._positions)
         })
 
     def _calculate_result(self, start_date: str, end_date: str) -> ETFBacktestResult:
@@ -523,7 +428,5 @@ class ETFBacktestEngine:
             win_rate=win_rate, profit_loss_ratio=profit_loss_ratio,
             avg_win=avg_win, avg_loss=avg_loss, max_win=max_win, max_loss=max_loss,
             avg_holding_days=avg_holding_days,
-            equity_curve=equity_df, trades=self._trades,
-            skipped_limit_up=self._skipped_limit_up,
-            skipped_limit_down=self._skipped_limit_down
+            equity_curve=equity_df, trades=self._trades
         )
