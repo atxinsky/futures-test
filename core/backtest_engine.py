@@ -76,7 +76,8 @@ class BacktestEngine:
         initial_capital: float = 100000.0,
         volume: int = 1,
         commission_rate: float = None,
-        check_limit_price: bool = True
+        check_limit_price: bool = True,
+        data: pd.DataFrame = None
     ) -> BacktestResult:
         """
         运行回测
@@ -91,14 +92,24 @@ class BacktestEngine:
             volume: 每笔交易数量
             commission_rate: 手续费率（覆盖默认值）
             check_limit_price: 是否检查涨跌停限制
+            data: 外部传入的K线数据（可选，优先使用）
 
         Returns:
             BacktestResult
         """
         logger.info(f"开始回测: {strategy.name} - {symbol} - {period}")
 
-        # 加载数据
-        df = self.data_loader.load_bars(symbol, period, start_date, end_date)
+        # 加载数据：优先使用外部传入的数据
+        if data is not None and len(data) > 0:
+            df = data.copy()
+            # 确保有time列
+            if 'time' not in df.columns:
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df['time'] = df.index
+                elif 'datetime' in df.columns:
+                    df['time'] = df['datetime']
+        else:
+            df = self.data_loader.load_bars(symbol, period, start_date, end_date)
 
         if df.empty:
             logger.error(f"无法加载数据: {symbol} {period}")

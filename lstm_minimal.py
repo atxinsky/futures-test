@@ -30,7 +30,7 @@ def load_data():
     
     conn = sqlite3.connect(db_path)
     # 尝试加载螺纹钢日线数据
-    query = f"SELECT time, open, high, low, close, volume FROM bars WHERE symbol = '{SYMBOL}' ORDER BY time ASC"
+    query = f"SELECT time, open, high, low, close, volume FROM futures_daily WHERE symbol = '{SYMBOL}' ORDER BY time ASC"
     df = pd.read_sql(query, conn)
     conn.close()
     
