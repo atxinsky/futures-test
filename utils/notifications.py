@@ -58,16 +58,26 @@ class NotificationService:
         NotificationType.RISK: "SystemHand",
     }
 
-    def __init__(self, enable_sound: bool = True, enable_desktop: bool = True):
+    def __init__(
+        self,
+        enable_sound: bool = True,
+        enable_desktop: bool = True,
+        wecom_webhook: str = None,
+        dingtalk_webhook: str = None
+    ):
         """
         初始化通知服务
 
         Args:
             enable_sound: 是否启用声音
             enable_desktop: 是否启用桌面通知
+            wecom_webhook: 企业微信机器人Webhook URL
+            dingtalk_webhook: 钉钉机器人Webhook URL
         """
         self.enable_sound = enable_sound
         self.enable_desktop = enable_desktop
+        self.wecom_webhook = wecom_webhook
+        self.dingtalk_webhook = dingtalk_webhook
         self._history: List[Notification] = []
         self._max_history = 100
         self._lock = threading.Lock()
@@ -77,8 +87,13 @@ class NotificationService:
         self._sound_available = self._check_sound()
         self._desktop_available = self._check_desktop()
 
+        # Webhook可用性
+        self._wecom_available = bool(wecom_webhook)
+        self._dingtalk_available = bool(dingtalk_webhook)
+
         logger.info(f"通知服务初始化: 平台={self._platform}, "
-                   f"声音={self._sound_available}, 桌面={self._desktop_available}")
+                   f"声音={self._sound_available}, 桌面={self._desktop_available}, "
+                   f"企业微信={self._wecom_available}, 钉钉={self._dingtalk_available}")
 
     def _check_sound(self) -> bool:
         """检查声音支持"""
@@ -141,6 +156,14 @@ class NotificationService:
         if notification.sound and self.enable_sound and self._sound_available:
             self._play_sound(notification.type)
 
+        # Webhook通知（风险/成交等重要消息）
+        important_types = [NotificationType.RISK, NotificationType.TRADE, NotificationType.ERROR]
+        if notification.type in important_types:
+            if self._wecom_available:
+                self._send_wecom(notification)
+            if self._dingtalk_available:
+                self._send_dingtalk(notification)
+
     def _send_desktop(self, notification: Notification):
         """发送桌面通知"""
         try:
@@ -190,6 +213,91 @@ class NotificationService:
                 pass
         except Exception as e:
             logger.debug(f"播放声音失败: {e}")
+
+    def _send_wecom(self, notification: Notification):
+        """发送企业微信机器人消息"""
+        if not self.wecom_webhook:
+            return
+
+        try:
+            import requests
+
+            # 构建消息
+            content = f"**{notification.title}**\n\n{notification.message}\n\n时间: {notification.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+
+            data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": content
+                }
+            }
+
+            response = requests.post(
+                self.wecom_webhook,
+                json=data,
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('errcode') != 0:
+                    logger.warning(f"企业微信发送失败: {result.get('errmsg')}")
+            else:
+                logger.warning(f"企业微信请求失败: {response.status_code}")
+
+        except ImportError:
+            logger.debug("requests库未安装，无法发送企业微信通知")
+        except Exception as e:
+            logger.debug(f"企业微信通知失败: {e}")
+
+    def _send_dingtalk(self, notification: Notification):
+        """发送钉钉机器人消息"""
+        if not self.dingtalk_webhook:
+            return
+
+        try:
+            import requests
+
+            # 构建消息
+            content = f"**{notification.title}**\n\n{notification.message}\n\n时间: {notification.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+
+            data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": notification.title,
+                    "text": content
+                }
+            }
+
+            response = requests.post(
+                self.dingtalk_webhook,
+                json=data,
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('errcode') != 0:
+                    logger.warning(f"钉钉发送失败: {result.get('errmsg')}")
+            else:
+                logger.warning(f"钉钉请求失败: {response.status_code}")
+
+        except ImportError:
+            logger.debug("requests库未安装，无法发送钉钉通知")
+        except Exception as e:
+            logger.debug(f"钉钉通知失败: {e}")
+
+    def set_wecom_webhook(self, webhook_url: str):
+        """设置企业微信Webhook"""
+        self.wecom_webhook = webhook_url
+        self._wecom_available = bool(webhook_url)
+        logger.info(f"企业微信Webhook已{'启用' if webhook_url else '禁用'}")
+
+    def set_dingtalk_webhook(self, webhook_url: str):
+        """设置钉钉Webhook"""
+        self.dingtalk_webhook = webhook_url
+        self._dingtalk_available = bool(webhook_url)
+        logger.info(f"钉钉Webhook已{'启用' if webhook_url else '禁用'}")
 
     def get_history(self, limit: int = 20) -> List[Notification]:
         """获取通知历史"""

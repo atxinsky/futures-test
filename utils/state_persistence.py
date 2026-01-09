@@ -142,6 +142,50 @@ class StatePersistence:
                 )
             ''')
 
+            # StrategyTrade表（交易生命周期）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_trades (
+                    trade_id TEXT PRIMARY KEY,
+                    strategy_name TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    exchange TEXT,
+                    direction TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    shares INTEGER DEFAULT 0,
+                    filled_shares INTEGER DEFAULT 0,
+                    closed_shares INTEGER DEFAULT 0,
+                    avg_entry_price REAL DEFAULT 0,
+                    avg_exit_price REAL DEFAULT 0,
+                    unrealized_pnl REAL DEFAULT 0,
+                    realized_pnl REAL DEFAULT 0,
+                    commission REAL DEFAULT 0,
+                    frozen_margin REAL DEFAULT 0,
+                    stop_loss_price REAL DEFAULT 0,
+                    take_profit_price REAL DEFAULT 0,
+                    highest_price REAL DEFAULT 0,
+                    lowest_price REAL DEFAULT 0,
+                    create_time TEXT,
+                    open_time TEXT,
+                    close_time TEXT,
+                    open_order_ids TEXT,
+                    close_order_ids TEXT,
+                    signal_id TEXT,
+                    entry_tag TEXT,
+                    exit_tag TEXT,
+                    update_time TEXT NOT NULL
+                )
+            ''')
+
+            # 创建索引加速查询
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_strategy_trades_status
+                ON strategy_trades(status)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_strategy_trades_symbol
+                ON strategy_trades(symbol, strategy_name)
+            ''')
+
             logger.debug("数据库表初始化完成")
 
     # ============ 持仓操作 ============
@@ -410,6 +454,195 @@ class StatePersistence:
         if dt is None:
             dt = datetime.now()
         self.set_state('last_sync_time', dt.isoformat())
+
+    # ============ StrategyTrade操作 ============
+
+    def save_strategy_trade(self, trade_data: dict):
+        """
+        保存StrategyTrade
+
+        Args:
+            trade_data: StrategyTrade.to_dict() 的结果或字典
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO strategy_trades
+                    (trade_id, strategy_name, symbol, exchange, direction, status,
+                     shares, filled_shares, closed_shares,
+                     avg_entry_price, avg_exit_price,
+                     unrealized_pnl, realized_pnl, commission, frozen_margin,
+                     stop_loss_price, take_profit_price,
+                     highest_price, lowest_price,
+                     create_time, open_time, close_time,
+                     open_order_ids, close_order_ids,
+                     signal_id, entry_tag, exit_tag, update_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    trade_data.get('trade_id'),
+                    trade_data.get('strategy_name', ''),
+                    trade_data.get('symbol', ''),
+                    trade_data.get('exchange', ''),
+                    trade_data.get('direction', ''),
+                    trade_data.get('status', ''),
+                    trade_data.get('shares', 0),
+                    trade_data.get('filled_shares', 0),
+                    trade_data.get('closed_shares', 0),
+                    trade_data.get('avg_entry_price', 0),
+                    trade_data.get('avg_exit_price', 0),
+                    trade_data.get('unrealized_pnl', 0),
+                    trade_data.get('realized_pnl', 0),
+                    trade_data.get('commission', 0),
+                    trade_data.get('frozen_margin', 0),
+                    trade_data.get('stop_loss_price', 0),
+                    trade_data.get('take_profit_price', 0),
+                    trade_data.get('highest_price', 0),
+                    trade_data.get('lowest_price', 0),
+                    trade_data.get('create_time', ''),
+                    trade_data.get('open_time', ''),
+                    trade_data.get('close_time', ''),
+                    json.dumps(trade_data.get('open_order_ids', [])),
+                    json.dumps(trade_data.get('close_order_ids', [])),
+                    trade_data.get('signal_id', ''),
+                    trade_data.get('entry_tag', ''),
+                    trade_data.get('exit_tag', ''),
+                    datetime.now().isoformat()
+                ))
+
+        logger.debug(f"保存StrategyTrade: {trade_data.get('trade_id')} 状态={trade_data.get('status')}")
+
+    def load_active_strategy_trades(self) -> List[dict]:
+        """
+        加载活跃的StrategyTrade（未平仓）
+
+        Returns:
+            活跃交易列表
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM strategy_trades
+                    WHERE status NOT IN ('closed', 'cancelled')
+                    ORDER BY create_time DESC
+                ''')
+                rows = cursor.fetchall()
+
+                trades = []
+                for row in rows:
+                    trade = dict(row)
+                    # 解析JSON字段
+                    trade['open_order_ids'] = json.loads(trade.get('open_order_ids') or '[]')
+                    trade['close_order_ids'] = json.loads(trade.get('close_order_ids') or '[]')
+                    trades.append(trade)
+
+                logger.info(f"加载 {len(trades)} 个活跃StrategyTrade")
+                return trades
+
+    def load_strategy_trade(self, trade_id: str) -> Optional[dict]:
+        """
+        加载单个StrategyTrade
+
+        Args:
+            trade_id: 交易ID
+
+        Returns:
+            交易数据字典
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM strategy_trades WHERE trade_id = ?', (trade_id,))
+                row = cursor.fetchone()
+                if row:
+                    trade = dict(row)
+                    trade['open_order_ids'] = json.loads(trade.get('open_order_ids') or '[]')
+                    trade['close_order_ids'] = json.loads(trade.get('close_order_ids') or '[]')
+                    return trade
+                return None
+
+    def get_strategy_trades_by_date(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        strategy: str = None
+    ) -> List[dict]:
+        """
+        按日期范围查询StrategyTrade
+
+        Args:
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            strategy: 策略名称过滤
+
+        Returns:
+            交易列表
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                sql = 'SELECT * FROM strategy_trades WHERE 1=1'
+                params = []
+
+                if start_date:
+                    sql += ' AND create_time >= ?'
+                    params.append(start_date)
+                if end_date:
+                    sql += ' AND create_time <= ?'
+                    params.append(end_date + 'T23:59:59')
+                if strategy:
+                    sql += ' AND strategy_name = ?'
+                    params.append(strategy)
+
+                sql += ' ORDER BY create_time DESC'
+
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+
+                trades = []
+                for row in rows:
+                    trade = dict(row)
+                    trade['open_order_ids'] = json.loads(trade.get('open_order_ids') or '[]')
+                    trade['close_order_ids'] = json.loads(trade.get('close_order_ids') or '[]')
+                    trades.append(trade)
+
+                return trades
+
+    def delete_strategy_trade(self, trade_id: str):
+        """删除StrategyTrade记录"""
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM strategy_trades WHERE trade_id = ?', (trade_id,))
+        logger.debug(f"删除StrategyTrade: {trade_id}")
+
+    def cleanup_old_strategy_trades(self, keep_days: int = 90) -> int:
+        """
+        清理旧的已平仓交易记录
+
+        Args:
+            keep_days: 保留天数
+
+        Returns:
+            清理数量
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM strategy_trades
+                    WHERE status = 'closed' AND close_time < ?
+                ''', (cutoff,))
+                deleted = cursor.rowcount
+
+        if deleted > 0:
+            logger.info(f"清理旧StrategyTrade: {deleted}笔")
+        return deleted
 
 
 # 全局单例

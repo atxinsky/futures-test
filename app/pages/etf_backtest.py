@@ -61,13 +61,53 @@ def render_etf_backtest_page():
     with col2:
         st.markdown("### ⚙️ 策略参数")
 
-        strategy_name = st.selectbox("策略", ["BigBrother V14"])
+        strategy_options = [
+            "BigBrother V14 (EMA金叉+ADX)",
+            "BigBrother V17 (Donchian经典)",
+            "BigBrother V19 (Donchian科技)",
+            "BigBrother V20 (Donchian均衡)",
+            "BigBrother V21 (Donchian防跳空)"
+        ]
+        strategy_name = st.selectbox("策略", strategy_options)
 
-        base_position = st.slider("基础仓位", 0.05, 0.30, 0.18, 0.01)
-        max_loss = st.slider("硬止损比例", 0.05, 0.15, 0.07, 0.01)
-        atr_multiplier = st.slider("ATR止损倍数", 1.5, 4.0, 2.5, 0.1)
-        trail_start = st.slider("追踪止盈触发", 0.08, 0.30, 0.15, 0.01)
-        adx_threshold = st.slider("ADX阈值", 15, 30, 20, 1)
+        # 根据策略类型显示不同参数
+        if "V14" in strategy_name:
+            base_position = st.slider("基础仓位", 0.05, 0.30, 0.18, 0.01)
+            max_loss = st.slider("硬止损比例", 0.05, 0.15, 0.07, 0.01)
+            atr_multiplier = st.slider("ATR止损倍数", 1.5, 4.0, 2.5, 0.1)
+            trail_start = st.slider("追踪止盈触发", 0.08, 0.30, 0.15, 0.01)
+            adx_threshold = st.slider("ADX阈值", 15, 30, 20, 1)
+            strategy_params = {
+                "base_position": base_position,
+                "max_loss": max_loss,
+                "atr_multiplier": atr_multiplier,
+                "trail_start": trail_start,
+                "adx_threshold": adx_threshold
+            }
+        else:
+            # V17-V21 使用 Donchian Channel 参数
+            if "V17" in strategy_name:
+                risk_default, max_pos_default = 0.01, 0.25
+            elif "V19" in strategy_name:
+                risk_default, max_pos_default = 0.012, 0.22
+            else:  # V20, V21
+                risk_default, max_pos_default = 0.01, 0.30
+
+            risk_per_trade = st.slider("单笔风险", 0.005, 0.03, risk_default, 0.002)
+            max_position = st.slider("最大仓位", 0.10, 0.40, max_pos_default, 0.05)
+            donchian_high = st.slider("突破周期", 10, 30, 20, 5)
+            donchian_low = st.slider("跌破周期", 5, 20, 10, 5)
+
+            strategy_params = {
+                "risk_per_trade": risk_per_trade,
+                "max_position": max_position,
+                "donchian_high_period": donchian_high,
+                "donchian_low_period": donchian_low
+            }
+
+            if "V21" in strategy_name:
+                gap_up = st.slider("高开限制", 0.01, 0.05, 0.02, 0.005)
+                strategy_params["gap_up_limit"] = gap_up
 
     with col3:
         st.markdown("### 📋 标的池")
@@ -107,19 +147,14 @@ def render_etf_backtest_page():
             initial_capital=initial_capital,
             commission=commission,
             selected_etfs=selected_etfs,
-            strategy_params={
-                "base_position": base_position,
-                "max_loss": max_loss,
-                "atr_multiplier": atr_multiplier,
-                "trail_start": trail_start,
-                "adx_threshold": adx_threshold
-            },
+            strategy_name=strategy_name,
+            strategy_params=strategy_params,
             benchmark=benchmark.split(" ")[0]
         )
 
 
 def _run_etf_backtest(start_date, end_date, initial_capital, commission,
-                      selected_etfs, strategy_params, benchmark):
+                      selected_etfs, strategy_name, strategy_params, benchmark):
     """运行ETF回测"""
 
     with st.spinner("正在加载数据..."):
@@ -127,6 +162,9 @@ def _run_etf_backtest(start_date, end_date, initial_capital, commission,
             from core.etf_data_service import get_etf_data_service, ALL_ETFS
             from core.etf_backtest_engine import ETFBacktestEngine
             from strategies.etf_bigbrother_v14 import ETFBigBrotherV14
+            from strategies.etf_bigbrother_v17_v21 import (
+                ETFBigBrotherV17, ETFBigBrotherV19, ETFBigBrotherV20, ETFBigBrotherV21
+            )
 
             ds = get_etf_data_service()
 
@@ -169,7 +207,19 @@ def _run_etf_backtest(start_date, end_date, initial_capital, commission,
 
     with st.spinner("正在运行回测..."):
         try:
-            strategy = ETFBigBrotherV14(pool=selected_etfs, **strategy_params)
+            # 根据策略名称创建策略实例
+            if "V14" in strategy_name:
+                strategy = ETFBigBrotherV14(pool=selected_etfs, **strategy_params)
+            elif "V17" in strategy_name:
+                strategy = ETFBigBrotherV17(pool=selected_etfs, **strategy_params)
+            elif "V19" in strategy_name:
+                strategy = ETFBigBrotherV19(pool=selected_etfs, **strategy_params)
+            elif "V20" in strategy_name:
+                strategy = ETFBigBrotherV20(pool=selected_etfs, **strategy_params)
+            elif "V21" in strategy_name:
+                strategy = ETFBigBrotherV21(pool=selected_etfs, **strategy_params)
+            else:
+                strategy = ETFBigBrotherV14(pool=selected_etfs, **strategy_params)
 
             engine = ETFBacktestEngine(
                 initial_capital=initial_capital,

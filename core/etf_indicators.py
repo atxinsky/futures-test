@@ -79,6 +79,24 @@ def lowest(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(window=period).min()
 
 
+def donchian_channel(high: pd.Series, low: pd.Series, high_period: int = 20, low_period: int = 10) -> tuple:
+    """
+    Donchian Channel (唐奇安通道)
+
+    Args:
+        high: 最高价序列
+        low: 最低价序列
+        high_period: 上轨周期 (买入突破)
+        low_period: 下轨周期 (卖出跌破)
+
+    Returns:
+        (donchian_high, donchian_low) - 昨日的通道值
+    """
+    donchian_high = highest(high, high_period).shift(1)  # 昨日N日最高
+    donchian_low = lowest(low, low_period).shift(1)       # 昨日N日最低
+    return donchian_high, donchian_low
+
+
 def calculate_etf_indicators(df: pd.DataFrame, params: dict = None) -> pd.DataFrame:
     """
     计算所有ETF技术指标
@@ -97,6 +115,8 @@ def calculate_etf_indicators(df: pd.DataFrame, params: dict = None) -> pd.DataFr
             "adx_period": 14,
             "atr_period": 14,
             "high_period": 20,
+            "donchian_high_period": 20,
+            "donchian_low_period": 10,
         }
 
     df = df.copy()
@@ -115,6 +135,16 @@ def calculate_etf_indicators(df: pd.DataFrame, params: dict = None) -> pd.DataFr
     high_period = params.get("high_period", 20)
     df["high_20"] = highest(df["high"], high_period).shift(1)
     df["low_20"] = lowest(df["low"], high_period).shift(1)
+
+    # Donchian Channel (V17-V21策略使用)
+    donchian_high_period = params.get("donchian_high_period", 20)
+    donchian_low_period = params.get("donchian_low_period", 10)
+    df["donchian_high"], df["donchian_low"] = donchian_channel(
+        df["high"], df["low"], donchian_high_period, donchian_low_period
+    )
+
+    # 昨收价 (V21防跳空策略使用)
+    df["prev_close"] = df["close"].shift(1)
 
     # RSI
     df["rsi"] = rsi(df["close"], 14)

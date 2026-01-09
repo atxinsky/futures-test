@@ -31,7 +31,21 @@ from trading.order_manager import OrderManager
 from trading.position_manager import PositionManager
 from trading.risk_manager import RiskManager, RiskConfig
 from trading.account_manager import AccountManager
+from trading.trade_manager import TradeManager
 from strategies.base import BaseStrategy, create_strategy, get_registered_strategies
+
+# 可选服务
+try:
+    from utils.reconciliation import ReconciliationService, get_reconciliation_service
+    HAS_RECONCILIATION = True
+except ImportError:
+    HAS_RECONCILIATION = False
+
+try:
+    from utils.notifications import NotificationService, get_notification_service
+    HAS_NOTIFICATION = True
+except ImportError:
+    HAS_NOTIFICATION = False
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +127,11 @@ class LiveEngine:
         self.position_manager: Optional[PositionManager] = None
         self.risk_manager: Optional[RiskManager] = None
         self.account_manager: Optional[AccountManager] = None
+        self.trade_manager: Optional[TradeManager] = None
+
+        # ============ 辅助服务 ============
+        self.reconciliation_service: Optional[ReconciliationService] = None
+        self.notification_service: Optional[NotificationService] = None
 
         # ============ 策略管理 ============
         self.strategies: Dict[str, BaseStrategy] = {}
@@ -183,6 +202,7 @@ class LiveEngine:
         self.order_manager = OrderManager(self.event_engine, self.gateway)
         self.position_manager = PositionManager(self.event_engine)
         self.account_manager = AccountManager(self.event_engine)
+        self.trade_manager = TradeManager(self.event_engine, enable_persistence=True)
 
         # 风控配置
         risk_config = RiskConfig(**self.config.get('risk', {}))
@@ -194,8 +214,47 @@ class LiveEngine:
             self.position_manager.set_instrument_config(symbol, cfg)
             if hasattr(self.gateway, 'set_instrument_config'):
                 self.gateway.set_instrument_config(symbol, cfg)
+            # 设置TradeManager的合约乘数
+            if 'multiplier' in cfg:
+                self.trade_manager.set_multiplier(symbol, cfg['multiplier'])
+
+        # 初始化辅助服务
+        self._init_services()
 
         logger.info(f"网关初始化完成: {gateway_type}")
+
+    def _init_services(self):
+        """初始化辅助服务（对账、通知）"""
+        # 通知服务
+        if HAS_NOTIFICATION:
+            try:
+                self.notification_service = get_notification_service()
+                logger.info("通知服务初始化完成")
+            except Exception as e:
+                logger.warning(f"通知服务初始化失败: {e}")
+
+        # 对账服务
+        if HAS_RECONCILIATION and self.position_manager:
+            try:
+                self.reconciliation_service = get_reconciliation_service(
+                    position_manager=self.position_manager,
+                    gateway=self.gateway
+                )
+                # 设置对账差异回调
+                self.reconciliation_service.set_on_mismatch(self._on_reconciliation_mismatch)
+                logger.info("对账服务初始化完成")
+            except Exception as e:
+                logger.warning(f"对账服务初始化失败: {e}")
+
+    def _on_reconciliation_mismatch(self, result):
+        """对账发现差异时的回调"""
+        msg = f"对账发现差异: 不匹配={result.mismatched}, " \
+              f"本地缺失={result.missing_local}, 柜台缺失={result.missing_broker}"
+        logger.warning(msg)
+
+        # 发送通知
+        if self.notification_service:
+            self.notification_service.risk_alert(msg)
 
     def set_instrument_config(self, symbol: str, config: dict):
         """
@@ -454,8 +513,20 @@ class LiveEngine:
         trade: Trade = event.data
         logger.info(f"成交: {trade.symbol} {trade.direction.value} {trade.volume}@{trade.price}")
 
+        # TradeManager处理成交
+        if self.trade_manager:
+            self.trade_manager.process_fill(trade)
+
+        # 发送成交通知
+        if self.notification_service:
+            self.notification_service.trade_filled(
+                trade.symbol,
+                trade.direction.value,
+                trade.price,
+                trade.volume
+            )
+
         # 记录交易结果（用于风控统计）
-        # 简化处理：这里需要更复杂的盈亏计算逻辑
         if self._on_trade_callback:
             self._on_trade_callback(trade)
 
@@ -520,12 +591,38 @@ class LiveEngine:
         self.is_running = True
         self.start_time = datetime.now()
 
+        # 启动对账服务
+        if self.reconciliation_service:
+            self.reconciliation_service.start()
+            logger.info("对账服务已启动")
+
+        # 恢复TradeManager状态
+        if self.trade_manager:
+            restored = self.trade_manager.load_from_db()
+            if restored > 0:
+                logger.info(f"恢复 {restored} 个活跃交易")
+
         logger.info(f"实盘引擎启动, 初始资金: {initial_capital:.2f}")
+
+        # 发送启动通知
+        if self.notification_service:
+            self.notification_service.info("系统启动", f"实盘引擎已启动，资金: {initial_capital:.2f}")
 
     def stop(self):
         """停止引擎"""
         if not self.is_running:
             return
+
+        # 停止对账服务
+        if self.reconciliation_service:
+            self.reconciliation_service.stop()
+            logger.info("对账服务已停止")
+
+        # 保存TradeManager状态
+        if self.trade_manager:
+            saved = self.trade_manager.save_all_to_db()
+            if saved > 0:
+                logger.info(f"保存 {saved} 个活跃交易到数据库")
 
         # 断开网关
         if self.gateway:
@@ -535,6 +632,11 @@ class LiveEngine:
         self.event_engine.stop()
 
         self.is_running = False
+
+        # 发送停止通知
+        if self.notification_service:
+            self.notification_service.info("系统停止", "实盘引擎已停止")
+
         logger.info("实盘引擎停止")
 
     def feed_bar(self, bar: BarData):

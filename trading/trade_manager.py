@@ -19,6 +19,7 @@ from models.base import (
     StrategyTrade, Trade, Direction, Offset, TradeStatus,
     EventType, Event
 )
+from utils.state_persistence import get_state_persistence, StatePersistence
 
 # 延迟导入EventEngine，避免循环依赖
 EventEngine = None
@@ -63,8 +64,18 @@ class TradeManager:
         trades = manager.get_active_trades(symbol)
     """
 
-    def __init__(self, event_engine=None):
+    def __init__(self, event_engine=None, enable_persistence: bool = True):
         self.event_engine = event_engine
+        self.enable_persistence = enable_persistence
+
+        # 持久化
+        self._persistence: StatePersistence = None
+        if enable_persistence:
+            try:
+                self._persistence = get_state_persistence()
+            except Exception as e:
+                logger.warning(f"持久化初始化失败: {e}")
+                self._persistence = None
 
         # 交易存储
         self.trades: Dict[str, StrategyTrade] = {}           # trade_id -> StrategyTrade
@@ -160,6 +171,9 @@ class TradeManager:
             self.active_trades[trade_id] = trade
             self.trades_by_symbol[symbol].append(trade_id)
             self.trades_by_strategy[strategy_name].append(trade_id)
+
+        # 持久化
+        self._save_trade_to_db(trade)
 
         logger.info(f"创建交易: {trade_id} {symbol} {direction.value} x{shares}")
         return trade
@@ -257,6 +271,9 @@ class TradeManager:
             else:
                 logger.debug(f"交易更新: {trade_id} 状态={trade.status.value} "
                            f"持仓={trade.holding_shares}手")
+
+            # 持久化
+            self._save_trade_to_db(trade)
 
             return trade
 
@@ -539,3 +556,159 @@ class TradeManager:
             logger.info(f"导出交易记录: {filepath} ({len(records)}笔)")
 
         return records
+
+    # ============ 持久化方法 ============
+
+    def _save_trade_to_db(self, trade: StrategyTrade) -> None:
+        """保存交易到数据库"""
+        if not self._persistence:
+            return
+
+        try:
+            trade_data = trade.to_dict()
+            # 添加订单ID列表（to_dict可能没有）
+            trade_data['open_order_ids'] = trade.open_order_ids
+            trade_data['close_order_ids'] = trade.close_order_ids
+            self._persistence.save_strategy_trade(trade_data)
+        except Exception as e:
+            logger.error(f"保存交易失败: {trade.trade_id} - {e}")
+
+    def load_from_db(self) -> int:
+        """
+        从数据库恢复活跃交易
+
+        用于程序重启后恢复交易状态
+
+        Returns:
+            恢复的交易数量
+        """
+        if not self._persistence:
+            logger.warning("持久化未启用，无法恢复交易")
+            return 0
+
+        try:
+            trades_data = self._persistence.load_active_strategy_trades()
+
+            for data in trades_data:
+                trade = self._restore_trade_from_dict(data)
+                if trade:
+                    with self._lock:
+                        self.trades[trade.trade_id] = trade
+                        self.active_trades[trade.trade_id] = trade
+                        self.trades_by_symbol[trade.symbol].append(trade.trade_id)
+                        self.trades_by_strategy[trade.strategy_name].append(trade.trade_id)
+
+                        # 恢复订单关联
+                        for order_id in trade.open_order_ids:
+                            self.trades_by_order[order_id] = trade.trade_id
+                        for order_id in trade.close_order_ids:
+                            self.trades_by_order[order_id] = trade.trade_id
+
+            logger.info(f"从数据库恢复 {len(trades_data)} 个活跃交易")
+            return len(trades_data)
+
+        except Exception as e:
+            logger.error(f"恢复交易失败: {e}")
+            return 0
+
+    def _restore_trade_from_dict(self, data: dict) -> Optional[StrategyTrade]:
+        """从字典恢复StrategyTrade对象"""
+        try:
+            # 解析方向
+            direction_str = data.get('direction', 'long')
+            if isinstance(direction_str, str):
+                direction = Direction.LONG if direction_str.lower() == 'long' else Direction.SHORT
+            else:
+                direction = direction_str
+
+            # 解析状态
+            status_str = data.get('status', 'pending')
+            status_map = {
+                'pending': TradeStatus.PENDING,
+                'opening': TradeStatus.OPENING,
+                'holding': TradeStatus.HOLDING,
+                'closing': TradeStatus.CLOSING,
+                'closed': TradeStatus.CLOSED,
+                'cancelled': TradeStatus.CANCELLED
+            }
+            status = status_map.get(status_str.lower(), TradeStatus.PENDING)
+
+            # 解析时间
+            create_time = None
+            if data.get('create_time'):
+                try:
+                    create_time = datetime.fromisoformat(data['create_time'])
+                except:
+                    create_time = datetime.now()
+
+            open_time = None
+            if data.get('open_time'):
+                try:
+                    open_time = datetime.fromisoformat(data['open_time'])
+                except:
+                    pass
+
+            close_time = None
+            if data.get('close_time'):
+                try:
+                    close_time = datetime.fromisoformat(data['close_time'])
+                except:
+                    pass
+
+            trade = StrategyTrade(
+                trade_id=data.get('trade_id', ''),
+                strategy_name=data.get('strategy_name', ''),
+                symbol=data.get('symbol', ''),
+                exchange=data.get('exchange', ''),
+                direction=direction,
+                status=status,
+                shares=data.get('shares', 0),
+                filled_shares=data.get('filled_shares', 0),
+                closed_shares=data.get('closed_shares', 0),
+                avg_entry_price=data.get('avg_entry_price', 0),
+                avg_exit_price=data.get('avg_exit_price', 0),
+                unrealized_pnl=data.get('unrealized_pnl', 0),
+                realized_pnl=data.get('realized_pnl', 0),
+                commission=data.get('commission', 0),
+                frozen_margin=data.get('frozen_margin', 0),
+                stop_loss_price=data.get('stop_loss_price', 0),
+                take_profit_price=data.get('take_profit_price', 0),
+                highest_price=data.get('highest_price', 0),
+                lowest_price=data.get('lowest_price', 0),
+                create_time=create_time or datetime.now(),
+                open_time=open_time,
+                close_time=close_time,
+                open_order_ids=data.get('open_order_ids', []),
+                close_order_ids=data.get('close_order_ids', []),
+                signal_id=data.get('signal_id', ''),
+                entry_tag=data.get('entry_tag', ''),
+                exit_tag=data.get('exit_tag', '')
+            )
+
+            return trade
+
+        except Exception as e:
+            logger.error(f"恢复交易对象失败: {data.get('trade_id')} - {e}")
+            return None
+
+    def save_all_to_db(self) -> int:
+        """
+        保存所有活跃交易到数据库
+
+        Returns:
+            保存的交易数量
+        """
+        if not self._persistence:
+            return 0
+
+        count = 0
+        with self._lock:
+            for trade in self.active_trades.values():
+                try:
+                    self._save_trade_to_db(trade)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"保存交易失败: {trade.trade_id} - {e}")
+
+        logger.info(f"保存 {count} 个活跃交易到数据库")
+        return count
