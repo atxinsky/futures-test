@@ -424,15 +424,23 @@ def _run_futures_optimization(strategy_key, strategy_display, symbols, train_sta
         from utils.data_loader import load_futures_data
 
         all_data = {}
-        for symbol in symbols:
-            df = load_futures_data(symbol, train_start, val_end)
+        for i, symbol in enumerate(symbols):
+            log(f"加载 {symbol} ({i+1}/{len(symbols)})...")
+            status_text.text(f"加载数据: {symbol} ({i+1}/{len(symbols)})")
+
+            df = load_futures_data(symbol, train_start, val_end, auto_download=True)
             if df is not None and len(df) > 0:
                 all_data[symbol] = df
-                log(f"加载: {symbol} - {len(df)}行")
+                log(f"  {symbol}: {len(df)}行")
+            else:
+                log(f"  {symbol}: 无数据，跳过")
 
         if not all_data:
-            st.error("无法加载数据，请检查数据源")
+            st.error("无法加载任何品种数据。请检查：\n1. 天勤账号是否配置正确\n2. 网络是否正常\n3. 数据库路径是否正确")
+            st.info("数据库路径: D:\\期货\\回测改造\\data\\futures_tq.db")
             return
+
+        log(f"数据加载完成，共 {len(all_data)} 个品种")
 
     except Exception as e:
         st.error(f"数据加载失败: {e}")

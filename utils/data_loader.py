@@ -373,21 +373,20 @@ def get_data_loader(data_dir: str = None) -> DataLoader:
     return _data_loader
 
 
-def load_futures_data(symbol: str, start_date: str = None, end_date: str = None, period: str = '1d') -> Optional[pd.DataFrame]:
+def load_futures_data(symbol: str, start_date: str = None, end_date: str = None, period: str = '1d', auto_download: bool = True) -> Optional[pd.DataFrame]:
     """
-    便捷函数：加载期货数据
+    便捷函数：加载期货数据，支持自动下载
 
     Args:
         symbol: 品种代码（如 RB, I, MA）
         start_date: 开始日期，字符串格式 'YYYY-MM-DD'
         end_date: 结束日期，字符串格式 'YYYY-MM-DD'
         period: K线周期，默认 '1d'
+        auto_download: 数据不存在时是否自动下载，默认 True
 
     Returns:
         DataFrame，索引为日期时间
     """
-    loader = get_data_loader()
-
     # 转换日期
     start_dt = None
     end_dt = None
@@ -402,7 +401,20 @@ def load_futures_data(symbol: str, start_date: str = None, end_date: str = None,
         else:
             end_dt = end_date
 
-    df = loader.load_bars(symbol, period, start_dt, end_dt)
+    # 首先尝试从数据库加载
+    df = _load_from_database(symbol, period, start_dt, end_dt)
+
+    # 如果数据库没有数据或数据不足，尝试自动下载
+    if (df is None or len(df) < 50) and auto_download:
+        logger.info(f"数据不足，自动下载 {symbol} {period} 数据...")
+        if _auto_download_data(symbol, period, start_dt, end_dt):
+            # 下载成功后重新加载
+            df = _load_from_database(symbol, period, start_dt, end_dt)
+
+    # 如果数据库没数据，尝试从本地文件加载
+    if df is None or df.empty:
+        loader = get_data_loader()
+        df = loader.load_bars(symbol, period, start_dt, end_dt)
 
     if df is not None and not df.empty:
         # 确保索引是日期时间类型
@@ -412,6 +424,9 @@ def load_futures_data(symbol: str, start_date: str = None, end_date: str = None,
         elif 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
+        elif 'datetime' in df.columns:
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df.set_index('datetime', inplace=True)
         elif not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
 
@@ -419,3 +434,97 @@ def load_futures_data(symbol: str, start_date: str = None, end_date: str = None,
         df.sort_index(inplace=True)
 
     return df
+
+
+def _load_from_database(symbol: str, period: str, start_dt: datetime = None, end_dt: datetime = None) -> Optional[pd.DataFrame]:
+    """从SQLite数据库加载数据"""
+    import sqlite3
+
+    db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "futures_tq.db")
+
+    if not os.path.exists(db_path):
+        return None
+
+    try:
+        conn = sqlite3.connect(db_path)
+
+        # 构建查询
+        query = "SELECT datetime, open, high, low, close, volume, open_interest FROM kline_data WHERE symbol = ? AND period = ?"
+        params = [symbol, period]
+
+        if start_dt:
+            query += " AND datetime >= ?"
+            params.append(start_dt.strftime('%Y-%m-%d %H:%M:%S'))
+        if end_dt:
+            query += " AND datetime <= ?"
+            params.append(end_dt.strftime('%Y-%m-%d %H:%M:%S'))
+
+        query += " ORDER BY datetime"
+
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+
+        if len(df) > 0:
+            logger.info(f"从数据库加载 {symbol} {period}: {len(df)} 条")
+            return df
+
+    except Exception as e:
+        logger.warning(f"数据库读取失败: {e}")
+
+    return None
+
+
+def _auto_download_data(symbol: str, period: str, start_dt: datetime = None, end_dt: datetime = None) -> bool:
+    """自动下载数据到数据库"""
+    try:
+        # 导入下载模块
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+        from tq_downloader import (
+            SYMBOL_MAPPING, PERIOD_MAPPING, TQ_USER, TQ_PASSWORD,
+            init_database, download_symbol_data, save_to_database
+        )
+
+        if symbol not in SYMBOL_MAPPING:
+            logger.warning(f"品种 {symbol} 不在下载列表中")
+            return False
+
+        # 初始化数据库
+        init_database()
+
+        # 设置日期范围
+        if start_dt is None:
+            start_dt = datetime(2015, 1, 1)
+        if end_dt is None:
+            end_dt = datetime.now()
+
+        logger.info(f"开始下载 {symbol} {period} 数据: {start_dt.date()} ~ {end_dt.date()}")
+
+        # 连接天勤
+        from tqsdk import TqApi, TqAuth
+
+        api = TqApi(auth=TqAuth(TQ_USER, TQ_PASSWORD))
+
+        try:
+            # 下载数据
+            df = download_symbol_data(api, symbol, period, start_dt.date(), end_dt.date())
+
+            if df is not None and len(df) > 0:
+                # 保存到数据库
+                count = save_to_database(symbol, period, df)
+                logger.info(f"下载完成，保存 {count} 条数据")
+                return True
+            else:
+                logger.warning(f"下载 {symbol} 数据失败或无数据")
+                return False
+
+        finally:
+            api.close()
+
+    except ImportError as e:
+        logger.warning(f"自动下载失败，缺少依赖: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"自动下载失败: {e}")
+        return False
