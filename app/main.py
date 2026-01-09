@@ -56,6 +56,20 @@ try:
 except ImportError:
     HAS_ETF = False
 
+# 回测历史模块
+try:
+    from app.pages.backtest_history import render_backtest_history_page
+    HAS_BACKTEST_HISTORY = True
+except ImportError:
+    HAS_BACKTEST_HISTORY = False
+
+# 系统日志模块
+try:
+    from app.pages.system_logs import render_system_logs_page
+    HAS_SYSTEM_LOGS = True
+except ImportError:
+    HAS_SYSTEM_LOGS = False
+
 import json
 
 # TqSdk配置文件路径
@@ -1224,10 +1238,10 @@ def main():
         st.title("📈 期货量化系统")
         st.markdown("---")
 
-        # 导航 - 7个一级菜单
+        # 导航 - 9个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "ETF回测", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "回测系统", "ETF回测", "回测历史", "系统日志", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1276,6 +1290,16 @@ def main():
         render_backtest()
     elif page == "ETF回测":
         render_etf_backtest()
+    elif page == "回测历史":
+        if HAS_BACKTEST_HISTORY:
+            render_backtest_history_page()
+        else:
+            st.error("回测历史模块未加载")
+    elif page == "系统日志":
+        if HAS_SYSTEM_LOGS:
+            render_system_logs_page()
+        else:
+            st.error("系统日志模块未加载")
     elif page == "系统设置":
         render_settings()
 
@@ -1694,7 +1718,7 @@ def render_etf_backtest():
     # ETF子页面选择
     etf_page = st.radio(
         "功能选择",
-        ["策略回测", "数据管理"],
+        ["策略回测", "参数优化", "数据管理"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -1703,6 +1727,13 @@ def render_etf_backtest():
 
     if etf_page == "数据管理":
         render_etf_data_page()
+    elif etf_page == "参数优化":
+        try:
+            from app.pages.param_optimizer import render_param_optimizer_page
+            render_param_optimizer_page()
+        except ImportError as e:
+            st.error(f"参数优化模块加载失败: {e}")
+            st.info("请确保已安装: pip install optuna")
     else:
         render_etf_backtest_page()
 
@@ -1742,6 +1773,14 @@ def render_backtest():
             df_data = st.session_state.get('backtest_df_data', None)
 
             with result_container:
+                # 保存按钮
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col2:
+                    save_notes = st.text_input("备注", key="futures_save_notes", placeholder="可选：添加备注")
+                with col3:
+                    if st.button("💾 保存回测结果", type="primary", key="save_futures_backtest"):
+                        _save_futures_backtest_result(config, result, save_notes)
+
                 tabs = st.tabs(["概览", "K线交易图", "资金曲线", "交易记录", "统计分析"])
 
                 with tabs[0]:
@@ -1758,6 +1797,46 @@ def render_backtest():
 
                 with tabs[4]:
                     render_backtest_statistics(result)
+
+
+def _save_futures_backtest_result(config, result, notes: str = ""):
+    """保存期货回测结果到数据库"""
+    try:
+        from utils.backtest_storage import get_backtest_storage
+
+        storage = get_backtest_storage()
+
+        # 构建结果字典
+        result_dict = {
+            'total_pnl': result.total_pnl,
+            'total_return_pct': result.total_return_pct if hasattr(result, 'total_return_pct') else result.total_pnl / config.get('initial_capital', 100000),
+            'max_drawdown_pct': result.max_drawdown_pct if hasattr(result, 'max_drawdown_pct') else 0,
+            'sharpe_ratio': result.sharpe_ratio if hasattr(result, 'sharpe_ratio') else 0,
+            'win_rate': result.win_rate if hasattr(result, 'win_rate') else 0,
+            'total_trades': len(result.trades) if hasattr(result, 'trades') else 0,
+            'final_equity': result.final_equity if hasattr(result, 'final_equity') else config.get('initial_capital', 100000) + result.total_pnl,
+            'trades': result.trades if hasattr(result, 'trades') else [],
+            'equity_curve': result.daily_equity if hasattr(result, 'daily_equity') else None
+        }
+
+        backtest_id = storage.save_futures_backtest(
+            result=result_dict,
+            strategy_name=config.get('strategy_name', 'Unknown'),
+            symbols=config.get('symbols', []),
+            params=config.get('params', {}),
+            start_date=config.get('start_date', ''),
+            end_date=config.get('end_date', ''),
+            initial_capital=config.get('initial_capital', 100000),
+            notes=notes
+        )
+
+        st.success(f"回测已保存! ID: {backtest_id}")
+        st.info("可在「回测历史」页面查看所有保存的回测记录")
+
+    except Exception as e:
+        st.error(f"保存失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 
 def render_settings():
