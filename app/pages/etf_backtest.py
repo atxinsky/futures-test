@@ -17,9 +17,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 def render_etf_backtest_page():
     """渲染ETF回测页面"""
-    st.markdown("## 📈 ETF策略回测")
+    st.markdown("## ETF策略回测")
 
     from core.etf_data_service import ETF_POOLS, ALL_ETFS, BIGBROTHER_POOL
+
+    # 检测是否有优化参数待应用
+    if 'opt_apply_params' in st.session_state and st.session_state['opt_apply_params']:
+        opt = st.session_state['opt_apply_params']
+        with st.container():
+            st.info(f"""
+            **检测到优化参数可应用**  
+            策略: {opt['strategy']} | 目标: {opt['opt_target']}={opt['best_value']:.3f}  
+            标的池: {len(opt['etf_pool'])}个ETF | 训练集: {opt['train_range']}
+            """)
+            col_apply1, col_apply2, col_apply3 = st.columns([1, 1, 2])
+            with col_apply1:
+                if st.button("✅ 应用参数", type="primary", key="apply_opt_params"):
+                    # 保存到 applied_params 供 slider 使用
+                    st.session_state['applied_opt_params'] = opt.copy()
+                    st.session_state['opt_apply_params'] = None  # 清除待应用状态
+                    st.rerun()
+            with col_apply2:
+                if st.button("❌ 忽略", key="ignore_opt_params"):
+                    st.session_state['opt_apply_params'] = None
+                    st.rerun()
+        st.markdown("---")
+
+    # 获取已应用的优化参数（用于设置默认值）
+    applied = st.session_state.get('applied_opt_params', {})
+    applied_params = applied.get('params', {})
+    applied_pool = applied.get('etf_pool', [])
+    applied_strategy = applied.get('strategy', '')
 
     # 三列布局
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -61,6 +89,7 @@ def render_etf_backtest_page():
     with col2:
         st.markdown("### ⚙️ 策略参数")
 
+        # 根据优化参数自动选择策略
         strategy_options = [
             "BigBrother V14 (EMA金叉+ADX)",
             "BigBrother V17 (Donchian经典)",
@@ -68,15 +97,44 @@ def render_etf_backtest_page():
             "BigBrother V20 (Donchian均衡)",
             "BigBrother V21 (Donchian防跳空)"
         ]
-        strategy_name = st.selectbox("策略", strategy_options)
+
+        # 确定默认策略索引
+        default_strategy_idx = 0
+        if applied_strategy:
+            for i, opt in enumerate(strategy_options):
+                if "V14" in applied_strategy and "V14" in opt:
+                    default_strategy_idx = i
+                    break
+                elif "V17" in applied_strategy and "V17" in opt:
+                    default_strategy_idx = i
+                    break
+                elif "V21" in applied_strategy and "V21" in opt:
+                    default_strategy_idx = i
+                    break
+
+        strategy_name = st.selectbox("策略", strategy_options, index=default_strategy_idx)
+
+        # 显示已应用优化参数提示
+        if applied_params:
+            st.success(f"已应用优化参数 (可调整)")
 
         # 根据策略类型显示不同参数
         if "V14" in strategy_name:
-            base_position = st.slider("基础仓位", 0.05, 0.30, 0.18, 0.01)
-            max_loss = st.slider("硬止损比例", 0.05, 0.15, 0.07, 0.01)
-            atr_multiplier = st.slider("ATR止损倍数", 1.5, 4.0, 2.5, 0.1)
-            trail_start = st.slider("追踪止盈触发", 0.08, 0.30, 0.15, 0.01)
-            adx_threshold = st.slider("ADX阈值", 15, 30, 20, 1)
+            base_position = st.slider("基础仓位", 0.05, 0.30, 
+                                      applied_params.get('base_position', 0.18), 0.01,
+                                      key="v14_base_pos")
+            max_loss = st.slider("硬止损比例", 0.05, 0.15, 
+                                 applied_params.get('max_loss', 0.07), 0.01,
+                                 key="v14_max_loss")
+            atr_multiplier = st.slider("ATR止损倍数", 1.5, 4.0, 
+                                       applied_params.get('atr_multiplier', 2.5), 0.1,
+                                       key="v14_atr_mult")
+            trail_start = st.slider("追踪止盈触发", 0.08, 0.30, 
+                                    applied_params.get('trail_start', 0.15), 0.01,
+                                    key="v14_trail_start")
+            adx_threshold = st.slider("ADX阈值", 15, 30, 
+                                      int(applied_params.get('adx_threshold', 20)), 1,
+                                      key="v14_adx")
             strategy_params = {
                 "base_position": base_position,
                 "max_loss": max_loss,
@@ -93,10 +151,16 @@ def render_etf_backtest_page():
             else:  # V20, V21
                 risk_default, max_pos_default = 0.01, 0.30
 
-            risk_per_trade = st.slider("单笔风险", 0.005, 0.03, risk_default, 0.002)
-            max_position = st.slider("最大仓位", 0.10, 0.40, max_pos_default, 0.05)
-            donchian_high = st.slider("突破周期", 10, 30, 20, 5)
-            donchian_low = st.slider("跌破周期", 5, 20, 10, 5)
+            # 如果有优化参数，使用优化后的值
+            risk_val = applied_params.get('risk_per_trade', risk_default)
+            max_pos_val = applied_params.get('max_position', max_pos_default)
+            dc_high_val = int(applied_params.get('donchian_high_period', 20))
+            dc_low_val = int(applied_params.get('donchian_low_period', 10))
+
+            risk_per_trade = st.slider("单笔风险", 0.005, 0.03, risk_val, 0.002, key="dc_risk")
+            max_position = st.slider("最大仓位", 0.10, 0.40, max_pos_val, 0.05, key="dc_max_pos")
+            donchian_high = st.slider("突破周期", 10, 40, dc_high_val, 1, key="dc_high")
+            donchian_low = st.slider("跌破周期", 5, 25, dc_low_val, 1, key="dc_low")
 
             strategy_params = {
                 "risk_per_trade": risk_per_trade,
@@ -106,16 +170,27 @@ def render_etf_backtest_page():
             }
 
             if "V21" in strategy_name:
-                gap_up = st.slider("高开限制", 0.01, 0.05, 0.02, 0.005)
+                gap_val = applied_params.get('gap_up_limit', 0.02)
+                gap_up = st.slider("高开限制", 0.01, 0.05, gap_val, 0.005, key="dc_gap")
                 strategy_params["gap_up_limit"] = gap_up
 
     with col3:
         st.markdown("### 📋 标的池")
 
+        # 如果有优化参数应用，添加"优化参数池"选项
         pool_options = ["BigBrother V14 默认池"] + list(ETF_POOLS.keys()) + ["自定义"]
-        selected_pool = st.selectbox("预设池", pool_options)
+        if applied_pool:
+            pool_options = ["优化参数池"] + pool_options
 
-        if selected_pool == "BigBrother V14 默认池":
+        # 默认选择优化参数池（如果有）
+        default_pool_idx = 0
+
+        selected_pool = st.selectbox("预设池", pool_options, index=default_pool_idx, key="etf_pool_select")
+
+        if selected_pool == "优化参数池" and applied_pool:
+            default_codes = applied_pool
+            st.caption(f"来自优化结果: {len(applied_pool)}个ETF")
+        elif selected_pool == "BigBrother V14 默认池":
             default_codes = BIGBROTHER_POOL
         elif selected_pool == "自定义":
             default_codes = []
@@ -126,7 +201,8 @@ def render_etf_backtest_page():
             "选择ETF",
             options=list(ALL_ETFS.keys()),
             default=default_codes,
-            format_func=lambda x: f"{x} - {ALL_ETFS.get(x, '')}"
+            format_func=lambda x: f"{x} - {ALL_ETFS.get(x, '')}",
+            key="etf_multiselect"
         )
 
         benchmark = st.selectbox(

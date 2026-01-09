@@ -951,6 +951,27 @@ def _run_etf_optimization(strategy, train_start, train_end, val_start, val_end,
     code = _generate_strategy_code(strategy, best_params, etf_pool)
     st.code(code, language='python')
 
+    # 一键应用到回测
+    st.markdown("---")
+    st.markdown("#### 应用到回测")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if st.button("应用参数到ETF回测页面", type="primary", use_container_width=True, key="apply_to_backtest"):
+            # 保存到session_state
+            st.session_state['opt_apply_params'] = {
+                'strategy': strategy,
+                'params': best_params,
+                'etf_pool': etf_pool,
+                'train_range': f"{train_start}~{train_end}",
+                'val_range': f"{val_start}~{val_end}",
+                'best_value': best_value,
+                'opt_target': opt_target
+            }
+            st.success("参数已保存！请切换到 ETF回测 页面")
+            st.balloons()
+    with col2:
+        st.caption("点击后前往侧边栏 ETF回测 页面应用")
+
 
 def _validate_params(strategy, params, data, train_start, train_end, val_start, val_end, etf_pool, initial_capital):
     """验证集测试"""
