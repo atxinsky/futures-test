@@ -773,8 +773,26 @@ def _run_futures_optimization_v2(config: 'OptimizationConfig', param_spaces: Dic
     with col1:
         if st.button("保存为YAML配置", use_container_width=True, key="save_yaml"):
             try:
-                applier = ConfigApplier(config.strategy_name)
-                config_path = applier.save_config(best_params)
+                # 构造OptimizationResult用于保存
+                best_trial_data = best_trial if trial_results else {}
+                opt_result = OptimizationResult(
+                    strategy_name=config.strategy_name,
+                    symbol=None,  # 多品种
+                    best_params=best_params,
+                    best_value=best_value,
+                    train_metrics={
+                        'sharpe': best_trial_data.get('train_sharpe', 0),
+                        'return': best_trial_data.get('train_return', 0)
+                    },
+                    val_metrics={
+                        'sharpe': best_trial_data.get('val_sharpe', 0),
+                        'return': best_trial_data.get('val_return', 0)
+                    },
+                    param_importance={},
+                    optimization_history=pd.DataFrame(trial_results) if trial_results else pd.DataFrame(),
+                    config=config
+                )
+                config_path = ConfigApplier.save_optimized_config(opt_result)
                 st.success(f"配置已保存: {config_path}")
             except Exception as e:
                 st.error(f"保存失败: {e}")
