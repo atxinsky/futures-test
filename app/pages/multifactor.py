@@ -16,8 +16,10 @@ import os
 import threading
 import queue
 
-# 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 添加项目路径（确保multifactor模块可导入）
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 
 def render_multifactor_page():
@@ -187,6 +189,10 @@ def _run_multifactor_backtest(index_name, start_date, end_date, hold_num,
                                rebalance_num, train_days, retrain_freq,
                                initial_capital, max_stocks, selected_factors):
     """运行多因子回测"""
+    # 确保路径正确
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
     try:
         from multifactor.run_multifactor import run_multifactor_strategy
         from multifactor.data_loader import get_index_components
@@ -408,6 +414,10 @@ def _render_factor_importance(result):
 
     st.info("因子重要性分析需要完整的回测结果数据")
 
+    # 确保路径正确
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
     # 显示使用的因子
     from multifactor.factors import get_factor_list
     factors = get_factor_list()
@@ -447,15 +457,431 @@ def _render_model_training():
     """模型训练页面"""
     st.subheader("模型训练")
 
-    st.info("此功能正在开发中，敬请期待...")
+    # 确保路径正确（Streamlit热重载可能丢失路径）
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
 
-    st.markdown("""
-    **计划功能**
-    - 自定义模型参数
-    - 交叉验证
-    - 超参数调优
-    - 模型保存/加载
-    """)
+    # 检查依赖
+    try:
+        from multifactor.model import (
+            is_gpu_available, HAS_LIGHTGBM, HAS_OPTUNA,
+            cross_validate_ranker, optimize_hyperparams,
+            train_and_save_model, list_saved_models, load_saved_model
+        )
+        from multifactor.data_loader import StockDataLoader, get_index_components
+        from multifactor.factors import calculate_all_factors, get_factor_list, prepare_factor_data
+    except ImportError as e:
+        st.error(f"导入模块失败: {e}")
+        st.info(f"项目路径: {_project_root}")
+        st.info(f"sys.path: {sys.path[:3]}")
+        return
+
+    # 状态显示
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("LightGBM", "已安装" if HAS_LIGHTGBM else "未安装")
+    with col2:
+        st.metric("Optuna", "已安装" if HAS_OPTUNA else "未安装")
+
+    st.markdown("---")
+
+    # 训练模式选择
+    train_mode = st.radio(
+        "训练模式",
+        ["快速训练", "交叉验证", "超参数调优"],
+        horizontal=True
+    )
+
+    # 三列布局
+    col1, col2, col3 = st.columns([1, 1.2, 0.8])
+
+    with col1:
+        st.write("**数据设置**")
+
+        # 指数选择
+        index_options = {
+            "zz1000": "中证1000",
+            "zz500": "中证500",
+            "hs300": "沪深300"
+        }
+        index_name = st.selectbox(
+            "股票池",
+            options=list(index_options.keys()),
+            format_func=lambda x: index_options[x],
+            key="train_index"
+        )
+
+        # 股票数限制
+        max_stocks = st.number_input(
+            "股票数限制 (0=不限)",
+            min_value=0,
+            max_value=1000,
+            value=100,
+            help="限制股票数量加快训练速度"
+        )
+
+        # 日期范围
+        col_a, col_b = st.columns(2)
+        with col_a:
+            train_start = st.date_input(
+                "开始日期",
+                value=datetime(2023, 1, 1),
+                key="train_start"
+            )
+        with col_b:
+            train_end = st.date_input(
+                "结束日期",
+                value=datetime(2024, 12, 31),
+                key="train_end"
+            )
+
+        # LightGBM CPU版本已足够快，无需GPU
+
+    with col2:
+        st.write("**模型参数**")
+
+        if train_mode == "快速训练":
+            num_leaves = st.slider("叶子节点数", 15, 127, 31)
+            learning_rate = st.select_slider(
+                "学习率",
+                options=[0.01, 0.02, 0.05, 0.1, 0.2],
+                value=0.05
+            )
+            n_estimators = st.slider("树数量", 50, 300, 100)
+            train_ratio = st.slider("训练集比例", 0.6, 0.9, 0.8)
+
+            model_params = {
+                "num_leaves": num_leaves,
+                "learning_rate": learning_rate,
+                "n_estimators": n_estimators
+            }
+
+        elif train_mode == "交叉验证":
+            n_splits = st.slider("折数", 3, 10, 5)
+            num_leaves = st.slider("叶子节点数", 15, 127, 31, key="cv_leaves")
+            learning_rate = st.select_slider(
+                "学习率",
+                options=[0.01, 0.02, 0.05, 0.1, 0.2],
+                value=0.05,
+                key="cv_lr"
+            )
+
+            model_params = {
+                "num_leaves": num_leaves,
+                "learning_rate": learning_rate
+            }
+
+        else:  # 超参数调优
+            if not HAS_OPTUNA:
+                st.warning("需要安装Optuna: `pip install optuna`")
+
+            n_trials = st.slider("试验次数", 10, 100, 30)
+            n_cv_splits = st.slider("CV折数", 2, 5, 3)
+
+            st.caption("搜索空间:")
+            st.code("""
+num_leaves: [15, 127]
+learning_rate: [0.01, 0.2]
+n_estimators: [50, 300]
+feature_fraction: [0.5, 1.0]
+reg_alpha/lambda: [1e-8, 10.0]
+            """)
+
+        # 因子选择
+        st.write("**因子选择**")
+        all_factors = get_factor_list()
+        selected_factors = st.multiselect(
+            "选择因子",
+            options=all_factors,
+            default=all_factors,
+            key="train_factors"
+        )
+
+    with col3:
+        st.write("**模型管理**")
+
+        # 模型保存目录
+        model_dir = st.text_input(
+            "模型目录",
+            value="D:/期货/回测改造/models",
+            key="model_dir"
+        )
+
+        # 模型名称
+        model_name = st.text_input(
+            "模型名称 (留空自动生成)",
+            value="",
+            key="model_name"
+        )
+
+        st.markdown("---")
+
+        # 已保存的模型
+        st.write("**已保存模型**")
+        saved_models = list_saved_models(model_dir)
+
+        if saved_models:
+            for m in saved_models[:5]:
+                with st.expander(f"{m['model_name']} (IC: {m.get('val_ic', 0):.4f})"):
+                    st.write(f"创建时间: {m.get('created_at', 'N/A')[:19]}")
+                    st.write(f"训练样本: {m.get('train_samples', 0)}")
+                    st.write(f"验证IC: {m.get('val_ic', 0):.4f}")
+                    if st.button("加载", key=f"load_{m['model_name']}"):
+                        st.session_state.loaded_model = m['model_path']
+                        st.success(f"已选择: {m['model_name']}")
+        else:
+            st.caption("暂无保存的模型")
+
+    st.markdown("---")
+
+    # 训练按钮
+    if st.button("开始训练", type="primary", use_container_width=True):
+        _run_model_training(
+            train_mode=train_mode,
+            index_name=index_name,
+            max_stocks=max_stocks,
+            start_date=train_start.strftime("%Y-%m-%d"),
+            end_date=train_end.strftime("%Y-%m-%d"),
+            model_params=model_params if train_mode != "超参数调优" else None,
+            selected_factors=selected_factors,
+            model_dir=model_dir,
+            model_name=model_name if model_name else None,
+            n_splits=n_splits if train_mode == "交叉验证" else 5,
+            n_trials=n_trials if train_mode == "超参数调优" else 30,
+            n_cv_splits=n_cv_splits if train_mode == "超参数调优" else 3,
+            train_ratio=train_ratio if train_mode == "快速训练" else 0.8
+        )
+
+
+def _run_model_training(train_mode, index_name, max_stocks, start_date, end_date,
+                        model_params, selected_factors, model_dir, model_name,
+                        n_splits, n_trials, n_cv_splits, train_ratio):
+    """执行模型训练"""
+    # 确保路径正确
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
+    try:
+        from multifactor.model import (
+            cross_validate_ranker, optimize_hyperparams,
+            train_and_save_model
+        )
+        from multifactor.data_loader import StockDataLoader, get_index_components
+        from multifactor.factors import calculate_all_factors, prepare_factor_data
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # 1. 加载数据
+        status_text.text("正在加载数据...")
+        progress_bar.progress(10)
+
+        stock_pool = get_index_components(index_name)
+        if max_stocks > 0:
+            stock_pool = stock_pool[:max_stocks]
+
+        loader = StockDataLoader()
+
+        # 扩展日期范围
+        from datetime import datetime, timedelta
+        train_start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        extended_start = (train_start_dt - timedelta(days=200)).strftime("%Y-%m-%d")
+
+        stock_data = {}
+        for code in stock_pool:
+            df = loader.get_stock_data(code, extended_start, end_date)
+            if len(df) > 60:
+                stock_data[code] = df
+
+        status_text.text(f"已加载 {len(stock_data)} 只股票数据")
+        progress_bar.progress(30)
+
+        # 2. 计算因子
+        status_text.text("正在计算因子...")
+        for code in stock_data:
+            stock_data[code] = calculate_all_factors(stock_data[code])
+
+        progress_bar.progress(50)
+
+        # 3. 准备训练数据
+        status_text.text("正在准备训练数据...")
+
+        all_dates = set()
+        for df in stock_data.values():
+            all_dates.update(df["date"].tolist())
+        trading_dates = sorted([d for d in all_dates if start_date <= d <= end_date])
+
+        # 收集因子数据
+        factor_samples = []
+        for date in trading_dates[::5]:  # 每5天采样一次加快速度
+            day_data = prepare_factor_data(stock_data, date)
+            if len(day_data) > 0:
+                factor_samples.append(day_data)
+
+        if not factor_samples:
+            st.error("无法生成训练数据")
+            return
+
+        factor_data = pd.concat(factor_samples, ignore_index=True)
+        st.info(f"训练数据: {len(factor_data)} 样本, {len(selected_factors)} 因子")
+
+        progress_bar.progress(60)
+
+        # 4. 执行训练
+        if train_mode == "快速训练":
+            status_text.text("正在训练模型...")
+
+            result = train_and_save_model(
+                factor_data=factor_data,
+                factor_cols=selected_factors,
+                save_dir=model_dir,
+                model_name=model_name,
+                model_params=model_params,
+                use_gpu=False,
+                train_ratio=train_ratio
+            )
+
+            progress_bar.progress(100)
+            status_text.empty()
+
+            st.success(f"训练完成! 验证IC: {result['val_ic']:.4f}")
+            st.write(f"模型已保存: `{result['model_path']}`")
+
+            # 显示特征重要性
+            _display_feature_importance(result['meta'].get('feature_importance', {}))
+
+        elif train_mode == "交叉验证":
+            status_text.text("正在进行交叉验证...")
+
+            def cv_callback(fold, total, ic):
+                progress_bar.progress(60 + int(40 * fold / total))
+                status_text.text(f"Fold {fold}/{total}: IC = {ic:.4f}")
+
+            cv_result = cross_validate_ranker(
+                factor_data=factor_data,
+                factor_cols=selected_factors,
+                n_splits=n_splits,
+                model_params=model_params,
+                use_gpu=False,
+                callback=cv_callback
+            )
+
+            progress_bar.progress(100)
+            status_text.empty()
+
+            # 显示结果
+            st.success(f"交叉验证完成! 平均IC: {cv_result['mean_ic']:.4f} ± {cv_result['std_ic']:.4f}")
+
+            # IC曲线
+            _display_cv_results(cv_result)
+
+        else:  # 超参数调优
+            status_text.text("正在进行超参数调优...")
+
+            def optuna_callback(trial, total, ic):
+                progress_bar.progress(60 + int(40 * trial / total))
+                status_text.text(f"Trial {trial}/{total}: IC = {ic:.4f}")
+
+            try:
+                opt_result = optimize_hyperparams(
+                    factor_data=factor_data,
+                    factor_cols=selected_factors,
+                    n_trials=n_trials,
+                    n_cv_splits=n_cv_splits,
+                    use_gpu=False,
+                    callback=optuna_callback
+                )
+
+                progress_bar.progress(100)
+                status_text.empty()
+
+                st.success(f"调优完成! 最优IC: {opt_result['best_ic']:.4f}")
+
+                # 显示最优参数
+                st.write("**最优参数:**")
+                st.json(opt_result['best_params'])
+
+                # 用最优参数训练并保存
+                if st.button("使用最优参数保存模型"):
+                    save_result = train_and_save_model(
+                        factor_data=factor_data,
+                        factor_cols=selected_factors,
+                        save_dir=model_dir,
+                        model_name=model_name,
+                        model_params=opt_result['best_params'],
+                        use_gpu=use_gpu
+                    )
+                    st.success(f"模型已保存: {save_result['model_path']}")
+
+            except ImportError:
+                st.error("需要安装Optuna: pip install optuna")
+
+    except Exception as e:
+        st.error(f"训练出错: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
+
+def _display_feature_importance(importance: dict):
+    """显示特征重要性"""
+    if not importance:
+        return
+
+    st.write("**特征重要性 Top 10:**")
+
+    import plotly.graph_objects as go
+
+    # 取Top 10
+    top_features = list(importance.items())[:10]
+    features = [f[0] for f in top_features]
+    values = [f[1] for f in top_features]
+
+    fig = go.Figure(go.Bar(
+        x=values,
+        y=features,
+        orientation='h',
+        marker_color='#2196F3'
+    ))
+    fig.update_layout(
+        height=300,
+        yaxis=dict(autorange="reversed"),
+        margin=dict(l=100, r=20, t=20, b=20)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _display_cv_results(cv_result: dict):
+    """显示交叉验证结果"""
+    import plotly.graph_objects as go
+
+    # IC曲线
+    fold_results = cv_result.get('fold_results', [])
+    if fold_results:
+        folds = [r['fold'] for r in fold_results]
+        ics = [r['ic'] for r in fold_results]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=folds, y=ics,
+            mode='lines+markers',
+            name='IC',
+            line=dict(color='#2196F3', width=2),
+            marker=dict(size=10)
+        ))
+        fig.add_hline(y=cv_result['mean_ic'], line_dash="dash",
+                      annotation_text=f"平均: {cv_result['mean_ic']:.4f}")
+        fig.update_layout(
+            title="各折IC值",
+            xaxis_title="Fold",
+            yaxis_title="IC",
+            height=300
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 特征重要性
+    avg_importance = cv_result.get('avg_feature_importance', {})
+    if avg_importance:
+        _display_feature_importance(avg_importance)
 
 
 if __name__ == "__main__":

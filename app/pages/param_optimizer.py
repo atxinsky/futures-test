@@ -15,9 +15,18 @@ from plotly.subplots import make_subplots
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 logger = logging.getLogger(__name__)
+
+# 尝试导入ParamSpaceManager（用于期货策略预定义参数空间）
+try:
+    from optimization import ParamSpaceManager
+    HAS_PARAM_SPACE_MANAGER = True
+except ImportError:
+    HAS_PARAM_SPACE_MANAGER = False
 
 
 def render_param_optimizer_page():
@@ -312,19 +321,55 @@ def _get_futures_param_space(strategy_key: str) -> dict:
     """根据策略生成参数搜索空间UI"""
     param_space = {}
 
+    # 尝试从ParamSpaceManager获取预定义参数空间
+    predefined_space = None
+    if HAS_PARAM_SPACE_MANAGER and strategy_key in ParamSpaceManager.get_supported_strategies():
+        predefined_space = ParamSpaceManager.get_param_space(strategy_key)
+        st.success(f"已加载 {strategy_key} 预定义参数空间（{len(predefined_space)}个参数）")
+
     if strategy_key == "brother2v6":
-        st.write("**趋势参数**")
-        sml_len = st.slider("短期EMA范围", 8, 18, (10, 15), 1, key="b6_sml")
-        big_len = st.slider("长期EMA范围", 35, 70, (45, 55), 5, key="b6_big")
-        break_len = st.slider("突破周期范围", 20, 45, (25, 35), 5, key="b6_break")
+        # 使用预定义空间的值作为默认范围
+        if predefined_space:
+            st.write("**趋势参数**")
+            ps = {p.name: p for p in predefined_space}
+            sml_len = st.slider("短期EMA范围",
+                int(ps['sml_len'].low), int(ps['sml_len'].high),
+                (int(ps['sml_len'].low), int(ps['sml_len'].high)), 1, key="b6_sml")
+            big_len = st.slider("长期EMA范围",
+                int(ps['big_len'].low), int(ps['big_len'].high),
+                (int(ps['big_len'].low), int(ps['big_len'].high)), 5, key="b6_big")
+            break_len = st.slider("突破周期范围",
+                int(ps['break_len'].low), int(ps['break_len'].high),
+                (int(ps['break_len'].low), int(ps['break_len'].high)), 5, key="b6_break")
 
-        st.write("**过滤参数**")
-        adx_thres = st.slider("ADX阈值范围", 18.0, 28.0, (20.0, 25.0), 1.0, key="b6_adx")
-        chop_thres = st.slider("CHOP阈值范围", 45.0, 55.0, (48.0, 52.0), 1.0, key="b6_chop")
-        vol_multi = st.slider("放量倍数范围", 1.1, 2.0, (1.2, 1.5), 0.1, key="b6_vol")
+            st.write("**过滤参数**")
+            adx_thres = st.slider("ADX阈值范围",
+                ps['adx_thres'].low, ps['adx_thres'].high,
+                (ps['adx_thres'].low, ps['adx_thres'].high), 1.0, key="b6_adx")
+            chop_thres = st.slider("CHOP阈值范围",
+                ps['chop_thres'].low, ps['chop_thres'].high,
+                (ps['chop_thres'].low, ps['chop_thres'].high), 1.0, key="b6_chop")
+            vol_multi = st.slider("放量倍数范围",
+                ps['vol_multi'].low, ps['vol_multi'].high,
+                (ps['vol_multi'].low, ps['vol_multi'].high), 0.1, key="b6_vol")
 
-        st.write("**止损参数**")
-        stop_n = st.slider("止损ATR倍数", 2.0, 4.5, (2.5, 3.5), 0.5, key="b6_stop")
+            st.write("**止损参数**")
+            stop_n = st.slider("止损ATR倍数",
+                ps['stop_n'].low, ps['stop_n'].high,
+                (ps['stop_n'].low, ps['stop_n'].high), 0.5, key="b6_stop")
+        else:
+            st.write("**趋势参数**")
+            sml_len = st.slider("短期EMA范围", 8, 18, (10, 15), 1, key="b6_sml")
+            big_len = st.slider("长期EMA范围", 35, 70, (45, 55), 5, key="b6_big")
+            break_len = st.slider("突破周期范围", 20, 45, (25, 35), 5, key="b6_break")
+
+            st.write("**过滤参数**")
+            adx_thres = st.slider("ADX阈值范围", 18.0, 28.0, (20.0, 25.0), 1.0, key="b6_adx")
+            chop_thres = st.slider("CHOP阈值范围", 45.0, 55.0, (48.0, 52.0), 1.0, key="b6_chop")
+            vol_multi = st.slider("放量倍数范围", 1.1, 2.0, (1.2, 1.5), 0.1, key="b6_vol")
+
+            st.write("**止损参数**")
+            stop_n = st.slider("止损ATR倍数", 2.0, 4.5, (2.5, 3.5), 0.5, key="b6_stop")
 
         param_space = {
             'sml_len': sml_len, 'big_len': big_len, 'break_len': break_len,

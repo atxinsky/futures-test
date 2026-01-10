@@ -77,6 +77,20 @@ try:
 except ImportError:
     HAS_SYSTEM_LOGS = False
 
+# AI参数优化模块（整合ETF和期货优化）
+try:
+    from app.pages.param_optimizer import render_param_optimizer_page
+    HAS_PARAM_OPTIMIZER = True
+except ImportError:
+    HAS_PARAM_OPTIMIZER = False
+
+# 旧版auto_optimizer（保留兼容，但不再使用）
+try:
+    from app.pages.auto_optimizer import render_auto_optimizer_page
+    HAS_AUTO_OPTIMIZER = True
+except ImportError:
+    HAS_AUTO_OPTIMIZER = False
+
 import json
 
 # TqSdk配置文件路径
@@ -1246,10 +1260,10 @@ def main():
         st.title("📈 期货量化系统")
         st.markdown("---")
 
-        # 导航 - 10个一级菜单
+        # 导航 - 11个一级菜单
         page = st.radio(
             "功能模块",
-            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "期货回测", "股票回测", "多因子选股", "回测历史", "系统日志", "系统设置"],
+            ["仪表盘", "模拟交易", "实盘交易", "风控中心", "期货回测", "AI参数优化", "股票回测", "多因子选股", "回测历史", "系统日志", "系统设置"],
             label_visibility="collapsed"
         )
 
@@ -1296,6 +1310,12 @@ def main():
         render_risk_center()
     elif page == "期货回测":
         render_backtest()
+    elif page == "AI参数优化":
+        if HAS_PARAM_OPTIMIZER:
+            render_param_optimizer_page()
+        else:
+            st.error("参数优化模块未加载")
+            st.info("请确保已安装 optuna: `pip install optuna`")
     elif page == "股票回测":
         render_etf_backtest()
     elif page == "多因子选股":
@@ -1728,10 +1748,10 @@ def render_etf_backtest():
         st.error("ETF模块未加载，请检查依赖: pip install akshare")
         return
 
-    # ETF子页面选择
+    # ETF子页面选择（参数优化已移至独立一级菜单「AI参数优化」）
     etf_page = st.radio(
         "功能选择",
-        ["策略回测", "参数优化", "数据管理"],
+        ["策略回测", "数据管理"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -1740,13 +1760,6 @@ def render_etf_backtest():
 
     if etf_page == "数据管理":
         render_etf_data_page()
-    elif etf_page == "参数优化":
-        try:
-            from app.pages.param_optimizer import render_param_optimizer_page
-            render_param_optimizer_page()
-        except ImportError as e:
-            st.error(f"参数优化模块加载失败: {e}")
-            st.info("请确保已安装: pip install optuna")
     else:
         render_etf_backtest_page()
 
@@ -1755,7 +1768,7 @@ def render_backtest():
     """渲染期货回测系统页面"""
     st.title("期货回测系统")
 
-    # 回测子页面选择
+    # 回测子页面选择（AI参数优化已移至独立一级菜单）
     backtest_page = st.radio(
         "功能选择",
         ["策略回测", "数据管理"],
