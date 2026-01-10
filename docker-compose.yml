@@ -89,7 +89,10 @@ services:
       - ./app:/app/app
       - ./utils:/app/utils
       - ./tests:/app/tests
+      - ./optimization:/app/optimization
+      - ./configs:/app/configs
       - ./config.py:/app/config.py
+      - ./config_manager.py:/app/config_manager.py
       - ./tq_config.json:/app/tq_config.json
     environment:
       - TZ=Asia/Shanghai
