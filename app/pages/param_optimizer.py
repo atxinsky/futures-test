@@ -21,12 +21,19 @@ if _project_root not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-# 尝试导入ParamSpaceManager（用于期货策略预定义参数空间）
+# 尝试导入完整的optimization模块（用于期货策略优化）
 try:
-    from optimization import ParamSpaceManager
-    HAS_PARAM_SPACE_MANAGER = True
+    from optimization import (
+        OptunaOptimizer, OptimizationConfig, ParamSpaceManager,
+        ConfigApplier, OptimizationResult
+    )
+    HAS_OPTIMIZATION_MODULE = True
 except ImportError:
-    HAS_PARAM_SPACE_MANAGER = False
+    HAS_OPTIMIZATION_MODULE = False
+
+# 过拟合检测阈值
+OVERFITTING_THRESHOLD_HIGH = 40    # 严重过拟合
+OVERFITTING_THRESHOLD_MEDIUM = 20  # 轻度过拟合
 
 
 def render_param_optimizer_page():
@@ -211,110 +218,589 @@ def _render_etf_optimizer():
 
 
 def _render_futures_optimizer():
-    """期货策略优化界面"""
+    """期货策略优化界面 - 使用OptunaOptimizer"""
+
+    # 检查optimization模块是否可用
+    if not HAS_OPTIMIZATION_MODULE:
+        st.error("optimization模块未加载")
+        st.info("请确保 optimization/ 目录存在且包含所有必要文件")
+        st.code("pip install optuna")
+        return
+
+    # 导入配置
+    try:
+        from config import INSTRUMENTS
+    except ImportError:
+        INSTRUMENTS = {
+            "RB": {"name": "螺纹钢"}, "I": {"name": "铁矿石"},
+            "MA": {"name": "甲醇"}, "IF": {"name": "沪深300"},
+            "AU": {"name": "黄金"}, "CU": {"name": "铜"},
+        }
 
     # 三列布局
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
-        st.markdown("#### 优化配置")
+        st.markdown("#### 策略配置")
 
-        # 策略选择
-        strategy_options = {
-            "Brother2v6 (趋势突破)": "brother2v6",
-            "WaveTrend Final": "wavetrend_final",
-            "EMANew V5": "emanew_v5",
-            "Donchian Trend": "donchian_trend",
-            "Dual MA": "dual_ma",
+        # 获取支持的策略列表
+        supported_strategies = ParamSpaceManager.get_supported_strategies()
+
+        strategy_display_names = {
+            "brother2v6": "Brother2v6 (趋势突破)",
+            "brother2v5": "Brother2v5 (经典版)",
+            "brother2_enhanced": "Brother2 Enhanced",
+            "brother2v6_dual": "Brother2v6 Dual (双向)",
         }
-        strategy_display = st.selectbox("选择策略", list(strategy_options.keys()), key="futures_opt_strategy")
-        strategy_key = strategy_options[strategy_display]
+
+        # 如果有预定义策略就用，否则提供手动选项
+        if supported_strategies:
+            strategy_options = {
+                strategy_display_names.get(s, s): s
+                for s in supported_strategies
+            }
+        else:
+            strategy_options = {
+                "Brother2v6 (趋势突破)": "brother2v6",
+                "WaveTrend Final": "wavetrend_final",
+                "EMANew V5": "emanew_v5",
+            }
+
+        strategy_display = st.selectbox(
+            "选择策略",
+            list(strategy_options.keys()),
+            key="futures_opt_strategy"
+        )
+        strategy_name = strategy_options[strategy_display]
 
         # 品种选择
-        from config import INSTRUMENTS
         symbols = list(INSTRUMENTS.keys())
-        default_symbols = ["RB", "I", "MA", "TA", "IF"]
-        default_symbols = [s for s in default_symbols if s in symbols]
-
+        default_symbols = ["RB", "I", "MA", "IF"]
         selected_symbols = st.multiselect(
             "选择品种",
             options=symbols,
-            default=default_symbols[:3],
-            format_func=lambda x: f"{x} - {INSTRUMENTS[x]['name']}",
+            default=[s for s in default_symbols if s in symbols][:3],
+            format_func=lambda x: f"{x} - {INSTRUMENTS[x].get('name', x)}",
             key="futures_opt_symbols"
         )
 
-        # 时间设置
+        # 优化模式
+        opt_mode = st.radio(
+            "优化模式",
+            ["多品种综合优化", "每品种独立优化"],
+            help="综合优化：所有品种共享参数；独立优化：每品种单独优化",
+            key="futures_opt_mode"
+        )
+
+    with col2:
+        st.markdown("#### 参数配置")
+
+        # 检查是否有预定义参数空间
+        if strategy_name in ParamSpaceManager.get_supported_strategies():
+            all_params = ParamSpaceManager.get_all_params(strategy_name)
+            key_params = ParamSpaceManager.get_key_params(strategy_name)
+
+            param_preset = st.radio(
+                "参数集合",
+                [f"全参数 ({len(all_params)}个)", f"关键参数 ({len(key_params)}个)", "自定义"],
+                key="futures_param_preset"
+            )
+
+            if param_preset.startswith("全参数"):
+                param_spaces = all_params
+            elif param_preset.startswith("关键参数"):
+                param_spaces = key_params
+            else:
+                # 自定义参数选择
+                param_groups = ParamSpaceManager.get_param_groups(strategy_name)
+                selected_params = []
+
+                st.write("**选择要优化的参数:**")
+                for group_name, param_names in param_groups.items():
+                    with st.expander(group_name, expanded=True):
+                        for pname in param_names:
+                            if pname in all_params:
+                                space = all_params[pname]
+                                label = space.label or pname
+                                if st.checkbox(f"{label}", value=True, key=f"fut_custom_{pname}"):
+                                    selected_params.append(pname)
+
+                param_spaces = {k: v for k, v in all_params.items() if k in selected_params}
+
+            st.success(f"已选择 {len(param_spaces)} 个参数")
+
+            # 显示参数范围预览
+            if param_spaces:
+                with st.expander("参数范围预览"):
+                    for name, space in list(param_spaces.items())[:8]:
+                        label = space.label or name
+                        st.caption(f"{label}: {space.low} ~ {space.high}")
+                    if len(param_spaces) > 8:
+                        st.caption(f"... 还有 {len(param_spaces) - 8} 个参数")
+        else:
+            st.warning(f"策略 {strategy_name} 无预定义参数空间，请使用手动配置")
+            param_spaces = {}
+
+    with col3:
+        st.markdown("#### 优化设置")
+
+        # 时间范围
         st.write("**训练集**")
         train_col1, train_col2 = st.columns(2)
         with train_col1:
-            train_start = st.date_input("开始", value=datetime(2019, 1, 1), key="fut_train_start")
+            train_start = st.date_input("开始", datetime(2019, 1, 1), key="fut_train_start")
         with train_col2:
-            train_end = st.date_input("结束", value=datetime(2023, 12, 31), key="fut_train_end")
+            train_end = st.date_input("结束", datetime(2023, 12, 31), key="fut_train_end")
 
         st.write("**验证集**")
         val_col1, val_col2 = st.columns(2)
         with val_col1:
-            val_start = st.date_input("开始", value=datetime(2024, 1, 1), key="fut_val_start")
+            val_start = st.date_input("开始", datetime(2024, 1, 1), key="fut_val_start")
         with val_col2:
-            val_end = st.date_input("结束", value=datetime.now(), key="fut_val_end")
+            val_end = st.date_input("结束", datetime.now(), key="fut_val_end")
+
+        # 时间周期选择
+        timeframe = st.selectbox(
+            "K线周期",
+            ["1h", "4h", "1d"],
+            index=0,
+            format_func=lambda x: {"1h": "1小时", "4h": "4小时", "1d": "日线"}[x],
+            key="fut_timeframe"
+        )
 
         # 优化轮数
         n_trials = st.slider("优化轮数", 20, 200, 50, 10, key="fut_n_trials")
 
         # 优化目标
-        opt_target = st.selectbox(
+        objective = st.selectbox(
             "优化目标",
             ["sharpe", "calmar", "return", "sortino"],
             format_func=lambda x: {"sharpe": "夏普比率", "calmar": "卡玛比率",
-                                   "return": "总收益率", "sortino": "索提诺比率"}[x],
+                                   "return": "总收益率", "sortino": "Sortino比率"}[x],
             key="fut_opt_target"
         )
 
-    with col2:
-        st.markdown("#### 参数搜索空间")
-        param_space = _get_futures_param_space(strategy_key)
-
-    with col3:
-        st.markdown("#### 高级设置")
-
-        initial_capital = st.number_input("初始资金", 50000, 1000000, 100000, 10000, key="fut_capital")
-        min_trades = st.number_input("最少交易次数", 1, 50, 5, 1, key="fut_min_trades")
-        max_drawdown = st.slider("最大回撤限制", 0.20, 0.60, 0.40, 0.05, key="fut_max_dd")
-
-        st.markdown("---")
-        st.caption("**提示：** 期货优化可能较慢，建议先用少量品种测试")
+        # 高级设置
+        with st.expander("高级设置"):
+            initial_capital = st.number_input("初始资金", 50000, 1000000, 100000, 10000, key="fut_capital")
+            min_trades = st.number_input("最少交易次数", 1, 50, 5, 1, key="fut_min_trades")
+            max_drawdown = st.slider("最大回撤限制", 0.20, 0.60, 0.40, 0.05, key="fut_max_dd")
 
     st.markdown("---")
 
     # 运行按钮
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        run_btn = st.button("🚀 开始优化", type="primary", use_container_width=True, key="fut_run_opt")
+        run_btn = st.button(
+            "开始优化并保存配置",
+            type="primary",
+            use_container_width=True,
+            key="fut_run_opt"
+        )
 
     if run_btn:
         if not selected_symbols:
             st.error("请至少选择一个品种")
             return
 
-        _run_futures_optimization(
-            strategy_key=strategy_key,
-            strategy_display=strategy_display,
+        if not param_spaces:
+            st.error("请至少选择一个参数")
+            return
+
+        # 时间范围校验
+        if train_start >= train_end:
+            st.error("训练集开始日期必须早于结束日期")
+            return
+        if val_start >= val_end:
+            st.error("验证集开始日期必须早于结束日期")
+            return
+        if train_end >= val_start:
+            st.error("训练集结束日期必须早于验证集开始日期（避免数据泄露）")
+            return
+
+        # 检查时间跨度
+        train_days = (train_end - train_start).days
+        val_days = (val_end - val_start).days
+        if train_days < 180:
+            st.warning(f"训练集仅{train_days}天，建议至少180天")
+        if val_days < 60:
+            st.warning(f"验证集仅{val_days}天，建议至少60天")
+
+        # 创建优化配置
+        config = OptimizationConfig(
+            strategy_name=strategy_name,
             symbols=selected_symbols,
             train_start=train_start.strftime("%Y-%m-%d"),
             train_end=train_end.strftime("%Y-%m-%d"),
             val_start=val_start.strftime("%Y-%m-%d"),
             val_end=val_end.strftime("%Y-%m-%d"),
+            timeframe=timeframe,
             n_trials=n_trials,
-            opt_target=opt_target,
-            param_space=param_space,
+            objective=objective,
             initial_capital=initial_capital,
             min_trades=min_trades,
-            max_drawdown=max_drawdown
+            max_drawdown=max_drawdown,
+            per_symbol=(opt_mode == "每品种独立优化")
         )
+
+        # 执行优化
+        _run_futures_optimization_v2(config, param_spaces)
 
     # 显示历史优化结果
     _show_optimization_history("期货")
+
+
+def _run_futures_optimization_v2(config: 'OptimizationConfig', param_spaces: Dict[str, Any]):
+    """使用OptunaOptimizer运行期货参数优化（整合版）"""
+
+    # 进度显示
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    log_container = st.empty()
+
+    logs = []
+    def log(msg):
+        logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        log_container.code("\n".join(logs[-10:]))
+
+    log(f"开始优化: {config.strategy_name}")
+    log(f"品种: {', '.join(config.symbols)}")
+    log(f"训练集: {config.train_start} ~ {config.train_end}")
+    log(f"优化轮数: {config.n_trials}")
+
+    # 加载数据
+    status_text.text("加载数据...")
+    try:
+        from utils.data_loader import load_futures_data
+
+        all_data = {}
+        for i, symbol in enumerate(config.symbols):
+            log(f"加载 {symbol} ({i+1}/{len(config.symbols)})...")
+            status_text.text(f"加载数据: {symbol} ({i+1}/{len(config.symbols)})")
+
+            df = load_futures_data(symbol, config.train_start, config.val_end, auto_download=True)
+            if df is not None and len(df) > 0:
+                all_data[symbol] = df
+                log(f"  {symbol}: {len(df)}行")
+            else:
+                log(f"  {symbol}: 无数据，跳过")
+
+        if not all_data:
+            st.error("无法加载任何品种数据")
+            return
+
+        log(f"数据加载完成，共 {len(all_data)} 个品种")
+
+    except Exception as e:
+        st.error(f"数据加载失败: {e}")
+        logger.exception("数据加载失败")
+        return
+
+    # 获取策略类
+    strategy_class = _get_strategy_class(config.strategy_name)
+    if strategy_class is None:
+        st.error(f"无法加载策略: {config.strategy_name}")
+        return
+
+    # 创建OptunaOptimizer
+    status_text.text("初始化优化器...")
+    try:
+        optimizer = OptunaOptimizer(config)
+    except Exception as e:
+        st.error(f"优化器初始化失败: {e}")
+        return
+
+    # 定义目标函数
+    trial_results = []
+
+    def objective_wrapper(trial):
+        """包装目标函数以收集中间结果"""
+        from core.backtest_engine import BacktestEngine
+
+        # 从param_spaces构建参数
+        params = {}
+        for param_name, space in param_spaces.items():
+            if hasattr(space, 'low') and hasattr(space, 'high'):
+                # ParamSpace对象
+                if space.param_type == 'int':
+                    params[param_name] = trial.suggest_int(param_name, int(space.low), int(space.high))
+                else:
+                    step = space.step if hasattr(space, 'step') and space.step else None
+                    params[param_name] = trial.suggest_float(param_name, space.low, space.high, step=step)
+            elif isinstance(space, tuple) and len(space) == 2:
+                # 元组形式 (low, high)
+                low, high = space
+                if isinstance(low, int):
+                    params[param_name] = trial.suggest_int(param_name, low, high)
+                else:
+                    params[param_name] = trial.suggest_float(param_name, low, high)
+
+        # 训练集回测
+        train_metrics = {'sharpe': 0, 'return': 0, 'drawdown': 0, 'trades': 0}
+        valid_count = 0
+
+        for symbol, df in all_data.items():
+            try:
+                train_df = df[(df.index >= config.train_start) & (df.index <= config.train_end)]
+                if len(train_df) < 100:
+                    continue
+
+                strategy = strategy_class(params=params)
+                engine = BacktestEngine()
+                result = engine.run(
+                    strategy=strategy,
+                    symbol=symbol,
+                    data=train_df,
+                    initial_capital=config.initial_capital,
+                    check_limit_price=False
+                )
+
+                if result and result.total_trades > 0:
+                    train_metrics['sharpe'] += result.sharpe_ratio or 0
+                    train_metrics['return'] += result.total_return or 0
+                    train_metrics['drawdown'] = max(train_metrics['drawdown'], result.max_drawdown or 0)
+                    train_metrics['trades'] += result.total_trades
+                    valid_count += 1
+
+            except Exception as e:
+                logger.warning(f"回测 {symbol} 失败: {e}")
+                continue
+
+        if valid_count == 0:
+            return -999
+
+        # 平均化
+        train_metrics['sharpe'] /= valid_count
+        train_metrics['return'] /= valid_count
+
+        # 惩罚条件
+        if train_metrics['trades'] < config.min_trades:
+            return -999
+        if train_metrics['drawdown'] > config.max_drawdown:
+            return -999
+
+        # 验证集回测（过拟合检测）
+        val_metrics = {'sharpe': 0, 'return': 0}
+        val_count = 0
+
+        for symbol, df in all_data.items():
+            try:
+                val_df = df[(df.index >= config.val_start) & (df.index <= config.val_end)]
+                if len(val_df) < 50:
+                    continue
+
+                strategy = strategy_class(params=params)
+                engine = BacktestEngine()
+                result = engine.run(
+                    strategy=strategy,
+                    symbol=symbol,
+                    data=val_df,
+                    initial_capital=config.initial_capital,
+                    check_limit_price=False
+                )
+
+                if result:
+                    val_metrics['sharpe'] += result.sharpe_ratio or 0
+                    val_metrics['return'] += result.total_return or 0
+                    val_count += 1
+
+            except Exception:
+                continue
+
+        if val_count > 0:
+            val_metrics['sharpe'] /= val_count
+            val_metrics['return'] /= val_count
+
+        # 记录结果
+        trial_results.append({
+            'trial': trial.number,
+            'params': params.copy(),
+            'train_sharpe': train_metrics['sharpe'],
+            'train_return': train_metrics['return'],
+            'val_sharpe': val_metrics['sharpe'],
+            'val_return': val_metrics['return'],
+            'drawdown': train_metrics['drawdown'],
+            'trades': train_metrics['trades']
+        })
+
+        # 计算过拟合指标
+        if train_metrics['sharpe'] > 0:
+            decay = (train_metrics['sharpe'] - val_metrics['sharpe']) / train_metrics['sharpe'] * 100
+        else:
+            decay = 0
+
+        # 返回目标值（考虑过拟合惩罚）
+        if config.objective == 'sharpe':
+            score = train_metrics['sharpe']
+        elif config.objective == 'calmar':
+            score = train_metrics['return'] / train_metrics['drawdown'] if train_metrics['drawdown'] > 0 else train_metrics['return']
+        elif config.objective == 'return':
+            score = train_metrics['return']
+        elif config.objective == 'sortino':
+            score = train_metrics['sharpe']  # 简化处理
+        else:
+            score = train_metrics['sharpe']
+
+        # 过拟合惩罚
+        if decay > OVERFITTING_THRESHOLD_HIGH:
+            score *= 0.5  # 严重过拟合，大幅惩罚
+        elif decay > OVERFITTING_THRESHOLD_MEDIUM:
+            score *= 0.8  # 轻度过拟合，轻微惩罚
+
+        return score
+
+    # 运行优化
+    status_text.text("开始优化...")
+    import optuna
+
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=42)
+    )
+
+    def callback(study, trial):
+        progress = (trial.number + 1) / config.n_trials
+        progress_bar.progress(progress)
+        if trial.value and trial.value > -900:
+            log(f"Trial {trial.number}: {config.objective}={trial.value:.3f}")
+
+    try:
+        study.optimize(objective_wrapper, n_trials=config.n_trials, callbacks=[callback], show_progress_bar=False)
+    except Exception as e:
+        st.error(f"优化失败: {e}")
+        logger.exception("优化失败")
+        return
+
+    progress_bar.progress(1.0)
+    status_text.text("优化完成!")
+    log("优化完成!")
+
+    # 获取最优参数
+    best_params = study.best_params
+    best_value = study.best_value
+
+    st.success(f"最优{config.objective}: {best_value:.3f}")
+
+    # 显示最优参数
+    st.markdown("#### 最优参数")
+    params_df = pd.DataFrame([
+        {"参数": k, "最优值": f"{v:.4f}" if isinstance(v, float) else str(v)}
+        for k, v in best_params.items()
+    ])
+    st.dataframe(params_df, hide_index=True, use_container_width=True)
+
+    # 过拟合分析
+    st.markdown("#### 过拟合分析")
+    if trial_results:
+        best_trial = max(trial_results, key=lambda x: x.get('train_sharpe', 0))
+
+        train_sharpe = best_trial.get('train_sharpe', 0)
+        val_sharpe = best_trial.get('val_sharpe', 0)
+        decay = (train_sharpe - val_sharpe) / train_sharpe * 100 if train_sharpe > 0 else 0
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("训练集Sharpe", f"{train_sharpe:.3f}")
+            st.metric("训练集收益", f"{best_trial.get('train_return', 0)*100:.1f}%")
+        with col2:
+            st.metric("验证集Sharpe", f"{val_sharpe:.3f}")
+            st.metric("验证集收益", f"{best_trial.get('val_return', 0)*100:.1f}%")
+        with col3:
+            if decay > OVERFITTING_THRESHOLD_HIGH:
+                st.error(f"衰减: {decay:.1f}%")
+                st.caption("过拟合风险高")
+            elif decay > OVERFITTING_THRESHOLD_MEDIUM:
+                st.warning(f"衰减: {decay:.1f}%")
+                st.caption("轻度过拟合")
+            else:
+                st.success(f"衰减: {decay:.1f}%")
+                st.caption("参数稳健")
+
+    # 参数重要性
+    st.markdown("#### 参数重要性")
+    try:
+        importances = optuna.importance.get_param_importances(study)
+        imp_df = pd.DataFrame([
+            {"参数": k, "重要性": v}
+            for k, v in sorted(importances.items(), key=lambda x: -x[1])
+        ])
+
+        fig = go.Figure(go.Bar(
+            x=imp_df['重要性'],
+            y=imp_df['参数'],
+            orientation='h',
+            marker_color='#1f77b4'
+        ))
+        fig.update_layout(height=300, margin=dict(l=100, r=50, t=30, b=30))
+        st.plotly_chart(fig, use_container_width=True)
+
+    except Exception as e:
+        st.warning(f"无法计算参数重要性: {e}")
+
+    # 优化过程图（训练集 vs 验证集）
+    st.markdown("#### 优化收敛过程")
+    if trial_results:
+        results_df = pd.DataFrame(trial_results)
+        fig = make_subplots(rows=1, cols=2, subplot_titles=['Sharpe', '收益率'])
+
+        # Sharpe对比
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'], y=results_df['train_sharpe'],
+            mode='markers', name='训练集', marker=dict(size=5, color='#1f77b4')
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'], y=results_df['val_sharpe'],
+            mode='markers', name='验证集', marker=dict(size=5, color='#ff7f0e')
+        ), row=1, col=1)
+
+        # 收益率对比
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'], y=results_df['train_return'] * 100,
+            mode='markers', name='训练集收益', marker=dict(size=5, color='#1f77b4'), showlegend=False
+        ), row=1, col=2)
+        fig.add_trace(go.Scatter(
+            x=results_df['trial'], y=results_df['val_return'] * 100,
+            mode='markers', name='验证集收益', marker=dict(size=5, color='#ff7f0e'), showlegend=False
+        ), row=1, col=2)
+
+        fig.update_layout(height=300)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 保存配置文件
+    st.markdown("#### 保存配置")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("保存为YAML配置", use_container_width=True, key="save_yaml"):
+            try:
+                applier = ConfigApplier(config.strategy_name)
+                config_path = applier.save_config(best_params)
+                st.success(f"配置已保存: {config_path}")
+            except Exception as e:
+                st.error(f"保存失败: {e}")
+
+    with col2:
+        if st.button("应用到回测页面", use_container_width=True, key="apply_futures"):
+            st.session_state['opt_apply_params'] = {
+                'strategy': config.strategy_name,
+                'params': best_params,
+                'symbols': config.symbols,
+                'train_sharpe': best_trial.get('train_sharpe', 0) if trial_results else 0,
+                'val_sharpe': best_trial.get('val_sharpe', 0) if trial_results else 0
+            }
+            st.success("参数已保存！请切换到期货回测页面")
+
+    # 保存到数据库
+    _save_optimization_result(
+        opt_type="期货",
+        strategy=config.strategy_name,
+        best_params=best_params,
+        best_value=best_value,
+        opt_target=config.objective,
+        n_trials=config.n_trials,
+        train_range=f"{config.train_start}~{config.train_end}",
+        val_range=f"{config.val_start}~{config.val_end}"
+    )
 
 
 def _get_futures_param_space(strategy_key: str) -> dict:
@@ -323,7 +809,7 @@ def _get_futures_param_space(strategy_key: str) -> dict:
 
     # 尝试从ParamSpaceManager获取预定义参数空间
     predefined_space = None
-    if HAS_PARAM_SPACE_MANAGER and strategy_key in ParamSpaceManager.get_supported_strategies():
+    if HAS_OPTIMIZATION_MODULE and strategy_key in ParamSpaceManager.get_supported_strategies():
         predefined_space = ParamSpaceManager.get_param_space(strategy_key)
         st.success(f"已加载 {strategy_key} 预定义参数空间（{len(predefined_space)}个参数）")
 
