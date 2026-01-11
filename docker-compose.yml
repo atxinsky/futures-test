@@ -22,7 +22,9 @@ services:
       - ./utils:/app/utils
       - ./tests:/app/tests
       - ./config.py:/app/config.py
+      - ./config.py:/app/config.py
       - ./tq_config.json:/app/tq_config.json
+      - ./.streamlit:/app/.streamlit
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
@@ -51,7 +53,9 @@ services:
       - ./models:/app/models
       - ./utils:/app/utils
       - ./config.py:/app/config.py
+      - ./config.py:/app/config.py
       - ./tq_config.json:/app/tq_config.json
+      - ./.streamlit:/app/.streamlit
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
@@ -93,7 +97,9 @@ services:
       - ./configs:/app/configs
       - ./config.py:/app/config.py
       - ./config_manager.py:/app/config_manager.py
+      - ./config_manager.py:/app/config_manager.py
       - ./tq_config.json:/app/tq_config.json
+      - ./.streamlit:/app/.streamlit
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1

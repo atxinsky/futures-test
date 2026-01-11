@@ -11,7 +11,18 @@ from multifactor.factors import (
     get_factor_list,
     prepare_factor_data
 )
-from multifactor.model import StockRanker, train_ranker
+from multifactor.model import (
+    StockRanker,
+    train_ranker,
+    cross_validate_ranker,
+    optimize_hyperparams,
+    train_and_save_model,
+    load_saved_model,
+    list_saved_models,
+    is_gpu_available,
+    HAS_LIGHTGBM,
+    HAS_OPTUNA
+)
 from multifactor.backtest import MultifactorBacktest
 from multifactor.run_multifactor import run_multifactor_strategy
 
@@ -26,6 +37,14 @@ __all__ = [
     'prepare_factor_data',
     'StockRanker',
     'train_ranker',
+    'cross_validate_ranker',
+    'optimize_hyperparams',
+    'train_and_save_model',
+    'load_saved_model',
+    'list_saved_models',
+    'is_gpu_available',
+    'HAS_LIGHTGBM',
+    'HAS_OPTUNA',
     'MultifactorBacktest',
     'run_multifactor_strategy'
 ]

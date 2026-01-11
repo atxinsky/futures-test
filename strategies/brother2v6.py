@@ -148,8 +148,9 @@ class Brother2v6Strategy(BaseStrategy):
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
         atr_adx = tr.rolling(window=p['adx_len']).mean()
-        plus_dm_smooth = pd.Series(plus_dm).rolling(window=p['adx_len']).mean()
-        minus_dm_smooth = pd.Series(minus_dm).rolling(window=p['adx_len']).mean()
+        # 修复：显式指定索引，确保与atr_adx对齐
+        plus_dm_smooth = pd.Series(plus_dm, index=df.index).rolling(window=p['adx_len']).mean()
+        minus_dm_smooth = pd.Series(minus_dm, index=df.index).rolling(window=p['adx_len']).mean()
 
         plus_di = 100 * plus_dm_smooth / (atr_adx + 1e-10)
         minus_di = 100 * minus_dm_smooth / (atr_adx + 1e-10)

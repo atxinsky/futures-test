@@ -9,12 +9,17 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import sys
 import os
+import sys
+from datetime import datetime, timedelta
 
-# 添加项目路径
+# 添加项目路径 (Must be before local imports)
+# This fixes ModuleNotFoundError in Docker
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.components.cards import render_metric_card, render_status_card
+from app.components.charts import render_interactive_kline, render_equity_curve
+from app.components.layout import render_header, render_sidebar
 
 # 导入回测相关模块
 from config import INSTRUMENTS, get_instrument, EXCHANGES
@@ -599,66 +604,13 @@ def render_backtest_overview(result):
 
 def render_backtest_equity_chart(result):
     """渲染资金曲线"""
+    # 使用新版图表组件，但保留原始 DataFrame 逻辑
+    if not hasattr(result, 'equity_curve') or result.equity_curve is None or result.equity_curve.empty:
+        st.warning("无资金曲线数据")
+        return
+
     st.subheader("资金曲线")
-
-    df = result.equity_curve
-
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=('账户净值', '回撤')
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=df['time'], y=df['equity'],
-            name='账户净值',
-            line=dict(color='#2196F3', width=2),
-            fill='tozeroy',
-            fillcolor='rgba(33, 150, 243, 0.1)'
-        ),
-        row=1, col=1
-    )
-
-    for trade in result.trades:
-        color = '#4CAF50' if trade.pnl > 0 else '#F44336'
-        fig.add_trace(
-            go.Scatter(
-                x=[trade.entry_time],
-                y=[trade.capital_before if trade.capital_before > 0 else result.initial_capital],
-                mode='markers',
-                marker=dict(symbol='triangle-up', size=10, color='#2196F3'),
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[trade.exit_time], y=[trade.capital_after],
-                mode='markers',
-                marker=dict(symbol='triangle-down', size=10, color=color),
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=df['time'], y=-df['drawdown_pct'],
-            name='回撤',
-            line=dict(color='#F44336', width=1),
-            fill='tozeroy',
-            fillcolor='rgba(244, 67, 54, 0.3)'
-        ),
-        row=2, col=1
-    )
-
-    fig.update_layout(height=600, hovermode='x unified', showlegend=True)
-    fig.update_yaxes(title_text="净值 (元)", row=1, col=1)
-    fig.update_yaxes(title_text="回撤 (%)", row=2, col=1)
-
+    fig = render_equity_curve(result.equity_curve)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -709,198 +661,32 @@ def render_backtest_kline_with_trades(result, df_data):
                       and t.exit_tag in tag_filter]
 
     st.write(f"显示 **{len(filtered_trades)}** / {len(result.trades)} 笔交易")
-
-    # 计算价格范围
-    price_min = df_data['low'].min()
-    price_max = df_data['high'].max()
-    price_range = price_max - price_min
-    y_min = price_min - price_range * 0.05
-    y_max = price_max + price_range * 0.08
-
-    # 创建K线图
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.02,
-        row_heights=[0.7, 0.15, 0.15],
-        subplot_titles=('', '', '')
-    )
-
-    # K线图
-    fig.add_trace(
-        go.Candlestick(
-            x=df_data['time'],
-            open=df_data['open'],
-            high=df_data['high'],
-            low=df_data['low'],
-            close=df_data['close'],
-            name='K线',
-            increasing_line_color='#EF5350',
-            decreasing_line_color='#26A69A',
-            increasing_fillcolor='#EF5350',
-            decreasing_fillcolor='#26A69A'
-        ),
-        row=1, col=1
-    )
-
-    # 成交量
-    colors = ['#EF5350' if close >= open else '#26A69A'
-              for close, open in zip(df_data['close'], df_data['open'])]
-    fig.add_trace(
-        go.Bar(x=df_data['time'], y=df_data['volume'], name='成交量', marker_color=colors, opacity=0.7),
-        row=2, col=1
-    )
-
-    # 持仓盈亏曲线
-    holding_pnl = []
-    holding_time = []
+    
+    # 构造交易点数据给组件
+    trade_points = []
+    
     for t in filtered_trades:
-        mask = (df_data['time'] >= t.entry_time) & (df_data['time'] <= t.exit_time)
-        trade_data = df_data[mask]
-        for _, row in trade_data.iterrows():
-            pnl_pct = (row['close'] - t.entry_price) / t.entry_price * 100
-            holding_pnl.append(pnl_pct)
-            holding_time.append(row['time'])
-
-    if holding_pnl:
-        fig.add_trace(
-            go.Scatter(
-                x=holding_time, y=holding_pnl,
-                mode='lines', name='持仓盈亏%',
-                line=dict(color='#FF9800', width=1),
-                fill='tozeroy', fillcolor='rgba(255, 152, 0, 0.2)'
-            ),
-            row=3, col=1
-        )
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
-
-    # 标记交易入场和出场
-    for t in filtered_trades:
-        is_win = t.pnl > 0
-
-        # 入场标记
-        entry_low = df_data[df_data['time'] == t.entry_time]['low'].values
-        entry_y = entry_low[0] * 0.995 if len(entry_low) > 0 else t.entry_price
-
-        fig.add_trace(
-            go.Scatter(
-                x=[t.entry_time], y=[entry_y],
-                mode='markers+text',
-                marker=dict(symbol='triangle-up', size=16, color='#2196F3', line=dict(color='white', width=1)),
-                text=[f'买{t.volume}手'],
-                textposition='bottom center',
-                textfont=dict(size=10, color='#2196F3'),
-                name=f'入场#{t.trade_id+1}',
-                showlegend=False,
-                hovertemplate=f"<b>入场 #{t.trade_id+1}</b><br>时间: {t.entry_time.strftime('%Y-%m-%d')}<br>价格: {t.entry_price:.2f}<br>手数: {t.volume}<extra></extra>"
-            ),
-            row=1, col=1
-        )
-
-        # 出场标记
+        # 入场点 (标记为 Long/Up)
+        trade_points.append({
+            'datetime': t.entry_time,
+            'price': t.entry_price,
+            'direction': 'LONG' # 统一用Long表示入场标记
+        })
+        
+        # 出场点 (标记为 Short/Down)
         if t.exit_time:
-            exit_high = df_data[df_data['time'] == t.exit_time]['high'].values
-            exit_y = exit_high[0] * 1.005 if len(exit_high) > 0 else t.exit_price
-            exit_color = '#4CAF50' if is_win else '#F44336'
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[t.exit_time], y=[exit_y],
-                    mode='markers+text',
-                    marker=dict(symbol='triangle-down', size=16, color=exit_color, line=dict(color='white', width=1)),
-                    text=[f'{t.pnl_pct:+.1f}%'],
-                    textposition='top center',
-                    textfont=dict(size=10, color=exit_color, weight='bold'),
-                    name=f'出场#{t.trade_id+1}',
-                    showlegend=False,
-                    hovertemplate=f"<b>出场 #{t.trade_id+1}</b><br>时间: {t.exit_time.strftime('%Y-%m-%d')}<br>价格: {t.exit_price:.2f}<br>盈亏: ¥{t.pnl:+,.0f} ({t.pnl_pct:+.2f}%)<br>原因: {t.exit_tag}<br>持仓: {t.holding_days}天<extra></extra>"
-                ),
-                row=1, col=1
-            )
-
-            # 连接线
-            fig.add_trace(
-                go.Scatter(
-                    x=[t.entry_time, t.exit_time],
-                    y=[t.entry_price, t.exit_price],
-                    mode='lines',
-                    line=dict(color=exit_color, width=2, dash='dot'),
-                    opacity=0.6, showlegend=False, hoverinfo='skip'
-                ),
-                row=1, col=1
-            )
-
-            # 持仓区间背景色
-            fig.add_shape(
-                type="rect",
-                x0=t.entry_time, x1=t.exit_time,
-                y0=y_min, y1=y_max,
-                fillcolor='rgba(76, 175, 80, 0.15)' if is_win else 'rgba(244, 67, 54, 0.15)',
-                layer='below', line_width=0,
-                row=1, col=1
-            )
-
-    # 聚焦到选中的交易
-    if selected_trade_idx is not None and selected_trade_idx < len(result.trades):
-        selected_trade = result.trades[selected_trade_idx]
-        trade_start = selected_trade.entry_time
-        trade_end = selected_trade.exit_time if selected_trade.exit_time else trade_start
-
-        try:
-            start_idx = df_data[df_data['time'] <= trade_start].index[-1] - 30
-            end_idx = df_data[df_data['time'] >= trade_end].index[0] + 30
-            start_idx = max(0, start_idx)
-            end_idx = min(len(df_data) - 1, end_idx)
-
-            x_start = df_data.iloc[start_idx]['time']
-            x_end = df_data.iloc[end_idx]['time']
-
-            visible_data = df_data.iloc[start_idx:end_idx+1]
-            vis_min = visible_data['low'].min()
-            vis_max = visible_data['high'].max()
-            vis_range = vis_max - vis_min
-            y_min = vis_min - vis_range * 0.05
-            y_max = vis_max + vis_range * 0.10
-
-            fig.update_xaxes(range=[x_start, x_end])
-            fig.update_yaxes(range=[y_min, y_max], row=1, col=1)
-        except:
-            pass
-
-    fig.update_layout(
-        height=700,
-        hovermode='x unified',
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=50, r=50, t=30, b=30)
-    )
-
-    fig.update_yaxes(title_text="价格", row=1, col=1, range=[y_min, y_max], fixedrange=False)
-    fig.update_yaxes(title_text="量", row=2, col=1)
-    fig.update_yaxes(title_text="%", row=3, col=1)
-
+             trade_points.append({
+                'datetime': t.exit_time,
+                'price': t.exit_price,
+                'direction': 'SHORT' # 统一用Short表示出场标记
+            })
+            
+    trades_df = pd.DataFrame(trade_points) if trade_points else None
+    
+    # 渲染组件
+    fig = render_interactive_kline(df_data, trades=trades_df, title="策略回测K线图")
     st.plotly_chart(fig, use_container_width=True)
 
-    # 显示选中交易的详情
-    if selected_trade_idx is not None and selected_trade_idx < len(result.trades):
-        t = result.trades[selected_trade_idx]
-        st.markdown("---")
-        st.write(f"### 交易 #{t.trade_id+1} 详情")
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("入场时间", t.entry_time.strftime('%Y-%m-%d'))
-            st.metric("入场价格", f"{t.entry_price:.2f}")
-        with col2:
-            st.metric("出场时间", t.exit_time.strftime('%Y-%m-%d') if t.exit_time else '-')
-            st.metric("出场价格", f"{t.exit_price:.2f}" if t.exit_price else '-')
-        with col3:
-            st.metric("持仓天数", f"{t.holding_days}天")
-            st.metric("交易手数", f"{t.volume}手")
-        with col4:
-            st.metric("盈亏金额", f"¥{t.pnl:+,.0f}", delta=f"{t.pnl_pct:+.2f}%")
-            st.metric("出场原因", t.exit_tag)
 
 
 def render_backtest_trades_table(result):
@@ -1116,52 +902,6 @@ st.markdown("""
     footer {visibility: hidden;}
     [data-testid="stSidebarNav"] {display: none;}
     header[data-testid="stHeader"] {display: none;}
-
-    /* 全局文字颜色 */
-    .stMarkdown, .stText, p, span, label, div {
-        color: #000000 !important;
-    }
-
-    /* 卡片样式 */
-    .metric-card {
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        border-radius: 10px;
-        padding: 20px;
-        border: 1px solid #dee2e6;
-        margin-bottom: 10px;
-    }
-
-    .metric-value {
-        font-size: 28px;
-        font-weight: bold;
-        color: #000000;
-    }
-
-    .metric-label {
-        font-size: 14px;
-        color: #000000;
-        margin-bottom: 5px;
-    }
-
-    .metric-change-positive {
-        color: #2ecc71;
-        font-size: 14px;
-    }
-
-    .metric-change-negative {
-        color: #e74c3c;
-        font-size: 14px;
-    }
-
-    /* 状态指示器 */
-    .status-running {
-        color: #2ecc71 !important;
-        font-weight: bold;
-    }
-
-    .status-stopped {
-        color: #e74c3c !important;
-        font-weight: bold;
     }
 
     /* 表格样式优化 */
@@ -1239,18 +979,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def render_metric_card(label: str, value: str, change: str = None, change_type: str = "neutral"):
-    """渲染指标卡片"""
-    change_class = "metric-change-positive" if change_type == "positive" else "metric-change-negative"
-    change_html = f'<div class="{change_class}">{change}</div>' if change else ""
 
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">{label}</div>
-        <div class="metric-value">{value}</div>
-        {change_html}
-    </div>
-    """, unsafe_allow_html=True)
 
 
 def main():
@@ -1348,82 +1077,79 @@ def render_dashboard():
     sim_running = sim_engine is not None and sim_engine.is_running if sim_engine else False
     live_running = live_engine is not None and live_engine.is_running if live_engine else False
 
-    # 系统状态卡片
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.subheader("模拟交易")
-        if sim_running:
-            st.success("运行中")
-            account = sim_engine.get_account()
-            if account:
-                st.metric("账户权益", f"¥{account.balance:,.0f}")
-                st.metric("持仓数量", f"{len(sim_engine.get_positions())}")
-        else:
-            st.info("未启动")
-            st.caption("前往「模拟交易」页面启动")
-
-    with col2:
-        st.subheader("实盘交易")
-        if live_running:
-            st.success("运行中")
-            account = live_engine.get_account()
-            if account:
-                st.metric("账户权益", f"¥{account.balance:,.0f}")
-                st.metric("持仓数量", f"{len(live_engine.get_positions())}")
-        else:
-            st.warning("未启动")
-            st.caption("前往「实盘交易」页面启动")
-
-    with col3:
-        st.subheader("系统信息")
-        st.metric("已配置策略", f"{len(get_all_strategies())}")
-        st.metric("已配置品种", f"{len(INSTRUMENTS)}")
+    # 1. 状态概览区域
+    st.subheader("系统状态")
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        render_status_card(
+            "模拟交易", 
+            "active" if sim_running else "inactive",
+            details=f"权益: ¥{sim_engine.get_account().balance:,.0f}" if sim_running and sim_engine.get_account() else "点击启动"
+        )
+        
+    with c2:
+        render_status_card(
+            "实盘交易", 
+            "active" if live_running else "inactive", 
+             details=f"权益: ¥{live_engine.get_account().balance:,.0f}" if live_running and live_engine.get_account() else "需谨慎操作"
+        )
+        
+    with c3:
+        render_metric_card("已配置策略", f"{len(get_all_strategies())}", help_text="当前系统加载的策略总数")
 
     st.markdown("---")
 
-    # 快速操作
-    st.subheader("快速入口")
-
+    # 2. 快速入口
+    st.subheader("核心功能")
+    
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown("**模拟交易**")
-        st.caption("使用真实行情数据进行策略验证")
-        if st.button("进入模拟交易", use_container_width=True):
-            st.session_state.nav_page = "模拟交易"
-            st.rerun()
+        with st.container():
+            st.markdown("#### 模拟交易")
+            st.caption("真实行情策略验证")
+            if st.button("进入模拟交易", use_container_width=True, type="primary"):
+                st.session_state.nav_page = "模拟交易"
+                st.rerun()
 
     with col2:
-        st.markdown("**策略回测**")
-        st.caption("历史数据回测，评估策略表现")
-        if st.button("进入期货回测", use_container_width=True):
-            st.session_state.nav_page = "期货回测"
-            st.rerun()
+        with st.container():
+            st.markdown("#### 策略回测")
+            st.caption("历史数据深度回测")
+            if st.button("进入期货回测", use_container_width=True):
+                st.session_state.nav_page = "期货回测"
+                st.rerun()
 
     with col3:
-        st.markdown("**风控中心**")
-        st.caption("设置风控规则，监控交易风险")
-        if st.button("进入风控中心", use_container_width=True):
-            st.session_state.nav_page = "风控中心"
-            st.rerun()
+        with st.container():
+            st.markdown("#### 风控中心")
+            st.caption("全局风控规则设置")
+            if st.button("进入风控中心", use_container_width=True):
+                st.session_state.nav_page = "风控中心"
+                st.rerun()
 
     with col4:
-        st.markdown("**系统设置**")
-        st.caption("配置天勤账号、品种参数等")
-        if st.button("进入系统设置", use_container_width=True):
-            st.session_state.nav_page = "系统设置"
-            st.rerun()
+        with st.container():
+            st.markdown("#### 系统设置")
+            st.caption("API与品种管理")
+            if st.button("进入系统设置", use_container_width=True):
+                st.session_state.nav_page = "系统设置"
+                st.rerun()
 
     st.markdown("---")
-
-    # 使用说明
-    st.subheader("使用流程")
-    st.markdown("""
-    1. **回测验证** → 在「期货回测」或「股票回测」中测试策略，确认参数
-    2. **模拟交易** → 在「模拟交易」中使用真实行情验证策略
-    3. **实盘上线** → 确认无误后，在「实盘交易」中启动真实交易
-    """)
+    
+    # 3. 统计概览 (示例)
+    st.subheader("数据概览")
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        render_metric_card("总交易品种", str(len(INSTRUMENTS)), delta="+2", help_text="本周新增2个关注品种")
+    with d2:
+        render_metric_card("数据记录数", "1,245,000", delta="+12%", help_text="数据库总K线数量")
+    with d3:
+        render_metric_card("平均回测耗时", "1.2s", delta="-0.3s", help_text="上次优化后性能提升")
+    with d4:
+        render_metric_card("系统负载", "Low", help_text="当前CPU使用率")
 
 
 def render_strategy_management():

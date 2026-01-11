@@ -1,0 +1,5 @@
+C:\Users\atxin\AppData\Local\Programs\Python\Python310\lib\runpy.py:126: RuntimeWarning: 'multifactor.run_multifactor' found in sys.modules after import of package 'multifactor', but prior to execution of 'multifactor.run_multifactor'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+2026-01-09 22:16:40,794 [INFO] 获取中证1000成分股: 1000只
+2026-01-09 22:16:40,797 [INFO] 数据库初始化完成: D:\期货\回测改造\data\stock_data.db
+2026-01-09 22:16:42,721 [INFO] 批量加载完成: 766只股票, 913329条记录

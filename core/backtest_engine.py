@@ -148,6 +148,7 @@ class BacktestEngine:
         entry_idx = 0
 
         trades: List[TradeRecord] = []
+        trade_counter = 0
         equity_history = []
 
         # 涨跌停管理器
@@ -249,7 +250,9 @@ class BacktestEngine:
                 pnl -= commission
 
                 # 记录交易
+                trade_counter += 1
                 trade = TradeRecord(
+                    trade_id=trade_counter,
                     entry_time=entry_time,
                     exit_time=current_time,
                     symbol=symbol,
@@ -260,7 +263,7 @@ class BacktestEngine:
                     pnl=pnl,
                     pnl_pct=pnl / (entry_price * volume * multiplier),
                     holding_bars=idx - entry_idx,
-                    tag=signal.tag
+                    exit_tag=signal.tag
                 )
                 trades.append(trade)
 
@@ -295,7 +298,9 @@ class BacktestEngine:
                     commission = commission_rate * volume
                 pnl -= commission
 
+                trade_counter += 1
                 trade = TradeRecord(
+                    trade_id=trade_counter,
                     entry_time=entry_time,
                     exit_time=current_time,
                     symbol=symbol,
@@ -306,7 +311,7 @@ class BacktestEngine:
                     pnl=pnl,
                     pnl_pct=pnl / (entry_price * volume * multiplier),
                     holding_bars=idx - entry_idx,
-                    tag="反手平空"
+                    exit_tag="反手平空"
                 )
                 trades.append(trade)
                 capital += pnl
@@ -345,7 +350,9 @@ class BacktestEngine:
                     commission = commission_rate * volume
                 pnl -= commission
 
+                trade_counter += 1
                 trade = TradeRecord(
+                    trade_id=trade_counter,
                     entry_time=entry_time,
                     exit_time=current_time,
                     symbol=symbol,
@@ -356,7 +363,7 @@ class BacktestEngine:
                     pnl=pnl,
                     pnl_pct=pnl / (entry_price * volume * multiplier),
                     holding_bars=idx - entry_idx,
-                    tag="反手平多"
+                    exit_tag="反手平多"
                 )
                 trades.append(trade)
                 capital += pnl
@@ -392,7 +399,9 @@ class BacktestEngine:
                 commission = commission_rate * volume
             pnl -= commission
 
+            trade_counter += 1
             trade = TradeRecord(
+                trade_id=trade_counter,
                 entry_time=entry_time,
                 exit_time=last_time,
                 symbol=symbol,
@@ -403,7 +412,7 @@ class BacktestEngine:
                 pnl=pnl,
                 pnl_pct=pnl / (entry_price * volume * multiplier),
                 holding_bars=len(df) - 1 - entry_idx,
-                tag="回测结束平仓"
+                exit_tag="回测结束平仓"
             )
             trades.append(trade)
             capital += pnl

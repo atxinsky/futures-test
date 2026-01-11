@@ -12,8 +12,14 @@ import sqlite3
 import os
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
+
+# CPU核心数
+import multiprocessing
+CPU_COUNT = multiprocessing.cpu_count()
 
 # 数据库路径
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -49,6 +55,20 @@ class StockDataLoader:
                 pct_chg REAL,
                 PRIMARY KEY (code, date)
             )
+        """)
+
+        # 添加索引加速查询
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_stock_daily_code
+            ON stock_daily(code)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_stock_daily_date
+            ON stock_daily(date)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_stock_daily_code_date
+            ON stock_daily(code, date)
         """)
 
         # 股票基本信息表
@@ -175,6 +195,43 @@ class StockDataLoader:
         conn.close()
         return df
 
+    def get_stocks_data_batch(self, codes: list, start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
+        """
+        批量获取多只股票数据（一次SQL查询）
+
+        Args:
+            codes: 股票代码列表
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            {code: DataFrame} 字典
+        """
+        if not codes:
+            return {}
+
+        conn = sqlite3.connect(self.db_path)
+
+        # 使用IN子句一次查询所有股票
+        placeholders = ','.join(['?'] * len(codes))
+        query = f"""
+            SELECT * FROM stock_daily
+            WHERE code IN ({placeholders}) AND date >= ? AND date <= ?
+            ORDER BY code, date
+        """
+        params = codes + [start_date, end_date]
+
+        df = pd.read_sql(query, conn, params=params)
+        conn.close()
+
+        if df.empty:
+            return {}
+
+        # 按股票代码分组
+        result = {code: group.reset_index(drop=True) for code, group in df.groupby('code')}
+        logger.info(f"批量加载完成: {len(result)}只股票, {len(df)}条记录")
+        return result
+
     def update_stock_data(self, codes: list, start_date: str, end_date: str,
                           show_progress: bool = True) -> dict:
         """批量更新股票数据"""
@@ -200,13 +257,39 @@ class StockDataLoader:
 
         return results
 
-    def get_all_stock_data(self, codes: list, start_date: str, end_date: str) -> dict:
-        """获取多只股票的数据"""
+    def get_all_stock_data(self, codes: list, start_date: str, end_date: str,
+                           n_jobs: int = None) -> dict:
+        """
+        并行获取多只股票的数据
+
+        Args:
+            codes: 股票代码列表
+            start_date: 开始日期
+            end_date: 结束日期
+            n_jobs: 并行线程数，默认CPU核心数
+
+        Returns:
+            {code: DataFrame} 字典
+        """
+        if n_jobs is None:
+            n_jobs = min(CPU_COUNT, len(codes))
+
         data = {}
-        for code in codes:
+
+        def load_single(code):
             df = self.get_stock_data(code, start_date, end_date)
-            if len(df) > 0:
-                data[code] = df
+            return code, df
+
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = {executor.submit(load_single, code): code for code in codes}
+            for future in as_completed(futures):
+                try:
+                    code, df = future.result()
+                    if len(df) > 0:
+                        data[code] = df
+                except Exception as e:
+                    logger.warning(f"加载数据失败: {e}")
+
         return data
 
     def get_index_data(self, index_code: str = "000300", start_date: str = None,

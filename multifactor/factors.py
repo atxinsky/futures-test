@@ -11,10 +11,15 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import logging
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import multiprocessing
 
 logger = logging.getLogger(__name__)
+
+# CPU核心数
+CPU_COUNT = multiprocessing.cpu_count()
 
 
 def calculate_returns(df: pd.DataFrame, periods: list = [1, 5, 10, 20]) -> pd.DataFrame:
@@ -80,8 +85,12 @@ def calculate_volume_factors(df: pd.DataFrame) -> pd.DataFrame:
     df["amount_ma_ratio"] = df["amount"] / (df["amount_ma20"] + 1)
 
     if "turn" in df.columns:
-        df["turn_ma20"] = df["turn"].rolling(20).mean()
-        df["turn_ma_ratio"] = df["turn"] / (df["turn_ma20"] + 0.01)
+        # 换手率因子（低换手溢价）
+        df["turnover"] = df["turn"]  # 当日换手率
+        df["turnover_20d"] = df["turn"].rolling(20).mean()  # 20日平均换手率
+        df["turnover_60d"] = df["turn"].rolling(60).mean()  # 60日平均换手率
+        df["turnover_ratio"] = df["turn"] / (df["turnover_20d"] + 0.01)  # 换手率变化
+        df["turnover_std"] = df["turn"].rolling(20).std()  # 换手率波动
 
     return df
 
@@ -182,12 +191,34 @@ def calculate_all_factors(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_factor_list() -> List[str]:
-    """获取所有因子名称列表"""
+    """获取所有因子名称列表（P0版本：加入换手率因子）"""
+    return [
+        # 动量因子（保留中长期，去掉短期噪音）
+        "mom_20d", "mom_60d",
+        # 波动因子（精简）
+        "vol_20d", "vol_60d",
+        # 换手率因子（新增，A股有效）
+        "turnover", "turnover_20d", "turnover_60d", "turnover_ratio",
+        # 成交量因子
+        "vol_ma_ratio", "amount_ma_ratio",
+        # 价格因子
+        "price_to_high", "price_to_low", "price_position",
+        # 均线因子（精简）
+        "ma_bias_20", "ma_bias_60",
+        # 技术指标（精简）
+        "rsi", "macd_hist"
+    ]
+
+
+def get_factor_list_full() -> List[str]:
+    """获取完整因子列表（包含所有因子，用于对比测试）"""
     return [
         # 动量因子
         "mom_5d", "mom_10d", "mom_20d", "mom_60d", "reversal_5d",
         # 波动因子
         "vol_5d", "vol_20d", "vol_60d", "vol_ratio",
+        # 换手率因子
+        "turnover", "turnover_20d", "turnover_60d", "turnover_ratio", "turnover_std",
         # 成交量因子
         "vol_ma_ratio", "amount_ma_ratio",
         # 价格因子
@@ -200,13 +231,15 @@ def get_factor_list() -> List[str]:
 
 
 def prepare_factor_data(stock_data: Dict[str, pd.DataFrame],
-                        factor_date: str) -> pd.DataFrame:
+                        factor_date: str,
+                        already_computed: bool = True) -> pd.DataFrame:
     """
     准备某一天的因子截面数据
 
     Args:
         stock_data: {code: dataframe} 股票数据字典
         factor_date: 因子日期
+        already_computed: 是否已经计算过因子（默认True，避免重复计算）
 
     Returns:
         DataFrame with columns: [code, factor1, factor2, ...]
@@ -215,11 +248,12 @@ def prepare_factor_data(stock_data: Dict[str, pd.DataFrame],
     factor_cols = get_factor_list()
 
     for code, df in stock_data.items():
-        # 计算因子
-        df_factors = calculate_all_factors(df)
+        # 如果因子未计算过，才计算（默认假设已计算过）
+        if not already_computed:
+            df = calculate_all_factors(df)
 
         # 获取指定日期的因子值
-        day_data = df_factors[df_factors["date"] == factor_date]
+        day_data = df[df["date"] == factor_date]
         if len(day_data) == 0:
             continue
 
@@ -231,10 +265,10 @@ def prepare_factor_data(stock_data: Dict[str, pd.DataFrame],
                 row[col] = np.nan
 
         # 添加未来收益作为标签
-        idx = df_factors[df_factors["date"] == factor_date].index[0]
-        if idx + 5 < len(df_factors):
-            future_close = df_factors.iloc[idx + 5]["close"]
-            current_close = df_factors.iloc[idx]["close"]
+        idx = df[df["date"] == factor_date].index[0]
+        if idx + 5 < len(df):
+            future_close = df.iloc[idx + 5]["close"]
+            current_close = df.iloc[idx]["close"]
             row["future_ret_5d"] = (future_close - current_close) / current_close
         else:
             row["future_ret_5d"] = np.nan
@@ -258,3 +292,118 @@ def normalize_factors(df: pd.DataFrame, factor_cols: List[str]) -> pd.DataFrame:
             else:
                 df[col] = 0
     return df
+
+
+def _calculate_factors_single(args: Tuple[str, pd.DataFrame]) -> Tuple[str, pd.DataFrame]:
+    """计算单只股票的因子（用于并行）"""
+    code, df = args
+    try:
+        df_factors = calculate_all_factors(df)
+        return code, df_factors
+    except Exception as e:
+        logger.warning(f"计算{code}因子失败: {e}")
+        return code, df
+
+
+def calculate_factors_parallel(stock_data: Dict[str, pd.DataFrame],
+                               n_jobs: int = None) -> Dict[str, pd.DataFrame]:
+    """
+    并行计算所有股票的因子
+
+    Args:
+        stock_data: {code: DataFrame} 股票数据字典
+        n_jobs: 并行进程数，默认CPU核心数
+
+    Returns:
+        {code: DataFrame} 带因子的股票数据
+    """
+    if n_jobs is None:
+        n_jobs = min(CPU_COUNT, len(stock_data))
+
+    result = {}
+
+    # 使用线程池（因为Pandas操作会释放GIL）
+    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+        futures = {
+            executor.submit(_calculate_factors_single, (code, df)): code
+            for code, df in stock_data.items()
+        }
+
+        for future in as_completed(futures):
+            try:
+                code, df_factors = future.result()
+                result[code] = df_factors
+            except Exception as e:
+                code = futures[future]
+                logger.warning(f"计算{code}因子失败: {e}")
+                result[code] = stock_data[code]
+
+    return result
+
+
+def _prepare_single_date(args: Tuple[str, pd.DataFrame, str, List[str]]) -> dict:
+    """准备单只股票单日的因子数据（用于并行）"""
+    code, df_factors, factor_date, factor_cols = args
+
+    # 获取指定日期的因子值
+    day_data = df_factors[df_factors["date"] == factor_date]
+    if len(day_data) == 0:
+        return None
+
+    row = {"code": code, "date": factor_date}
+    for col in factor_cols:
+        if col in day_data.columns:
+            row[col] = day_data[col].iloc[0]
+        else:
+            row[col] = np.nan
+
+    # 添加未来收益作为标签
+    idx = df_factors[df_factors["date"] == factor_date].index[0]
+    if idx + 5 < len(df_factors):
+        future_close = df_factors.iloc[idx + 5]["close"]
+        current_close = df_factors.iloc[idx]["close"]
+        row["future_ret_5d"] = (future_close - current_close) / current_close
+    else:
+        row["future_ret_5d"] = np.nan
+
+    return row
+
+
+def prepare_factor_data_parallel(stock_data: Dict[str, pd.DataFrame],
+                                  factor_date: str,
+                                  n_jobs: int = None) -> pd.DataFrame:
+    """
+    并行准备某一天的因子截面数据
+
+    Args:
+        stock_data: {code: dataframe} 股票数据字典（已计算因子）
+        factor_date: 因子日期
+        n_jobs: 并行线程数
+
+    Returns:
+        DataFrame with columns: [code, factor1, factor2, ...]
+    """
+    if n_jobs is None:
+        n_jobs = min(CPU_COUNT, len(stock_data))
+
+    factor_cols = get_factor_list()
+    rows = []
+
+    # 准备参数
+    args_list = [
+        (code, df, factor_date, factor_cols)
+        for code, df in stock_data.items()
+    ]
+
+    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+        futures = [executor.submit(_prepare_single_date, args) for args in args_list]
+
+        for future in as_completed(futures):
+            try:
+                row = future.result()
+                if row is not None:
+                    rows.append(row)
+            except Exception as e:
+                logger.warning(f"准备因子数据失败: {e}")
+
+    return pd.DataFrame(rows)

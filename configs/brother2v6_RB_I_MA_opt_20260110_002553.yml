@@ -1,0 +1,77 @@
+name: backtest
+env: backtest
+leverage: 1
+market_type: futures
+contract_type: index
+initial_capital: 1000000
+time_start: '20200101'
+time_end: '20251231'
+run_policy:
+  name: brother2v6
+  timeframes: 日线
+  params:
+    sml_len: 13
+    big_len: 38
+    break_len: 26
+    atr_len: 22
+    adx_len: 13
+    adx_thres: 19.0
+    chop_len: 12
+    chop_thres: 49.0
+    vol_len: 21
+    vol_multi: 1.1
+    stop_n: 4.0
+    min_stop_n: 1.5
+    break_even_pct: 10.0
+    partial_trigger_pct: 9.0
+    partial_drawdown_pct: 8.0
+    partial_rate: 30.0
+    full_drawdown_pct: 12.0
+    capital_rate: 0.30000000000000004
+    risk_rate: 0.09999999999999999
+pairs:
+- RB
+- I
+- MA
+exchange:
+  name: shfe
+  fees:
+    maker: 0.0001
+    taker: 0.0001
+optimization_info:
+  best_value: -0.1244
+  objective: sharpe
+  train_sharpe: !!python/object/apply:numpy._core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    m1Wfq63Yv78=
+  train_return: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    aJHtfD81rj8=
+  val_sharpe: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    zH9Iv30d+L8=
+  val_return: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    iUFg5dAim78=
+  train_range: 2019-01-01~2023-12-31
+  val_range: 2024-01-01~2026-01-10
+  optimized_at: '2026-01-10 00:25:53'
+  symbol: multi
+  n_trials: 50

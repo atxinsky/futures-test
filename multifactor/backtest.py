@@ -67,8 +67,14 @@ class MultifactorBacktest:
 
     每日流程:
     1. 更新持仓市值
-    2. 执行换仓 (T+1)
-    3. 记录净值
+    2. 检查风控条件
+    3. 执行换仓 (T+1)
+    4. 记录净值
+
+    风控功能:
+    - 波动率择时: 高波动时减仓
+    - 换仓阈值: 预测分差小时不换
+    - 整体止损: 回撤超阈值清仓
     """
 
     def __init__(
@@ -77,13 +83,46 @@ class MultifactorBacktest:
         commission_rate: float = 0.001,  # 千分之一
         slippage: float = 0.001,
         hold_num: int = 10,  # 持仓数量
-        rebalance_num: int = 1  # 每日换仓数量
+        rebalance_num: int = 1,  # 每次换仓数量
+        # === 换手率控制参数 ===
+        rebalance_days: int = 1,  # 调仓周期（每N天调一次）
+        position_sticky: float = 0.0,  # 持仓粘性（0-1，越高越不易换出）
+        min_holding_days: int = 0,  # 最小持仓天数
+        # === 风控参数 ===
+        vol_timing: bool = False,  # 波动率择时
+        vol_threshold: float = 0.30,  # 波动率阈值 (年化30%)
+        vol_reduce_ratio: float = 0.5,  # 高波动时仓位比例
+        rebalance_threshold: float = 0.0,  # 换仓阈值 (预测分差)
+        drawdown_stop: bool = False,  # 整体止损
+        max_drawdown_limit: float = 0.15,  # 最大回撤阈值
+        cooldown_days: int = 10,  # 止损后冷却期
+        # === 市场择时参数 ===
+        market_timing: bool = False,  # 市场均线择时
+        market_ma_days: int = 20  # 市场均线天数
     ):
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
         self.slippage = slippage
         self.hold_num = hold_num
         self.rebalance_num = rebalance_num
+
+        # 换手率控制参数
+        self.rebalance_days = rebalance_days
+        self.position_sticky = position_sticky
+        self.min_holding_days = min_holding_days
+
+        # 风控参数
+        self.vol_timing = vol_timing
+        self.vol_threshold = vol_threshold
+        self.vol_reduce_ratio = vol_reduce_ratio
+        self.rebalance_threshold = rebalance_threshold
+        self.drawdown_stop = drawdown_stop
+        self.max_drawdown_limit = max_drawdown_limit
+        self.cooldown_days = cooldown_days
+
+        # 市场择时参数
+        self.market_timing = market_timing
+        self.market_ma_days = market_ma_days
 
         self._cash = initial_capital
         self._positions: Dict[str, StockPosition] = {}
@@ -94,6 +133,18 @@ class MultifactorBacktest:
         self._stock_data: Dict[str, pd.DataFrame] = {}
         self._pending_sells: List[str] = []
         self._pending_buys: List[str] = []
+
+        # 风控状态
+        self._market_returns: List[float] = []  # 市场收益率序列
+        self._peak_value: float = initial_capital  # 净值高点
+        self._in_drawdown_stop: bool = False  # 是否在止损状态
+        self._cooldown_counter: int = 0  # 冷却计数器
+        self._current_vol: float = 0  # 当前波动率
+
+        # 换手率控制状态
+        self._day_counter: int = 0  # 调仓日计数器
+        self._market_values: List[float] = []  # 市场净值序列（用于均线计算）
+        self._market_above_ma: bool = True  # 市场是否在均线上方
 
     def run(self, stock_data: Dict[str, pd.DataFrame],
             daily_selections: Dict[str, List[str]],
@@ -126,20 +177,54 @@ class MultifactorBacktest:
         prev_date = None
         for date in trading_dates:
             self._current_date = date
+            self._day_counter += 1
 
             # 1. 更新市值
             self._update_market_value()
 
-            # 2. 执行前一日的换仓信号 (T+1)
+            # 2. 更新市场收益率（用于波动率计算）
+            self._update_market_return()
+
+            # 3. 更新市场均线状态（用于市场择时）
+            self._update_market_timing()
+
+            # 4. 检查整体止损
+            if self._check_drawdown_stop():
+                # 止损状态：清仓并跳过交易
+                if self._positions:
+                    for code in list(self._positions.keys()):
+                        self._sell_stock(code)
+                self._pending_sells = []
+                self._pending_buys = []
+                self._record_equity()
+                prev_date = date
+                continue
+
+            # 5. 检查市场择时（熊市减仓或空仓）
+            if self.market_timing and not self._market_above_ma:
+                # 市场在均线下方，减仓到一半或清仓
+                if self._positions and len(self._positions) > self.hold_num // 2:
+                    # 只保留一半持仓
+                    keep_count = max(self.hold_num // 2, 1)
+                    to_sell = list(self._positions.keys())[keep_count:]
+                    for code in to_sell:
+                        self._sell_stock(code)
+
+            # 6. 执行前一日的换仓信号 (T+1)
             if self._pending_sells or self._pending_buys:
                 self._execute_rebalance()
 
-            # 3. 生成今日换仓信号
-            if date in daily_selections:
-                target_stocks = daily_selections[date][:self.hold_num]
+            # 7. 生成今日换仓信号（考虑调仓周期）
+            is_rebalance_day = (self._day_counter % self.rebalance_days == 0)
+            if date in daily_selections and is_rebalance_day:
+                effective_hold_num = self._get_effective_hold_num()
+                # 市场择时：熊市减仓
+                if self.market_timing and not self._market_above_ma:
+                    effective_hold_num = max(effective_hold_num // 2, 1)
+                target_stocks = daily_selections[date][:effective_hold_num]
                 self._generate_rebalance_signal(target_stocks)
 
-            # 4. 记录净值
+            # 8. 记录净值
             self._record_equity()
 
             prev_date = date
@@ -153,6 +238,106 @@ class MultifactorBacktest:
         self._equity_history = []
         self._pending_sells = []
         self._pending_buys = []
+        # 风控状态重置
+        self._market_returns = []
+        self._peak_value = self.initial_capital
+        self._in_drawdown_stop = False
+        self._cooldown_counter = 0
+        self._current_vol = 0
+        # 换手率控制状态重置
+        self._day_counter = 0
+        self._market_values = []
+        self._market_above_ma = True
+
+    def _calculate_market_volatility(self) -> float:
+        """计算市场20日波动率（年化）"""
+        if len(self._market_returns) < 20:
+            return 0.0
+        recent_returns = self._market_returns[-20:]
+        daily_vol = np.std(recent_returns)
+        annual_vol = daily_vol * np.sqrt(252)
+        return annual_vol
+
+    def _update_market_timing(self):
+        """更新市场均线状态（用于市场择时）"""
+        current_value = self._get_total_value()
+        self._market_values.append(current_value)
+
+        if not self.market_timing:
+            return
+
+        # 计算MA
+        if len(self._market_values) >= self.market_ma_days:
+            ma = np.mean(self._market_values[-self.market_ma_days:])
+            self._market_above_ma = current_value >= ma
+        else:
+            self._market_above_ma = True  # 数据不足，默认做多
+
+    def _update_market_return(self):
+        """更新市场收益率（用持仓股票平均收益）"""
+        if not self._positions:
+            return
+
+        daily_returns = []
+        for code in self._positions.keys():
+            if code not in self._stock_data:
+                continue
+            df = self._stock_data[code]
+            day_df = df[df["date"] == self._current_date]
+            if len(day_df) == 0:
+                continue
+            row = day_df.iloc[0]
+            if row["open"] > 0:
+                ret = (row["close"] - row["open"]) / row["open"]
+                daily_returns.append(ret)
+
+        if daily_returns:
+            avg_return = np.mean(daily_returns)
+            self._market_returns.append(avg_return)
+
+    def _check_drawdown_stop(self) -> bool:
+        """检查是否触发整体止损"""
+        if not self.drawdown_stop:
+            return False
+
+        current_value = self._get_total_value()
+
+        # 更新高点
+        if current_value > self._peak_value:
+            self._peak_value = current_value
+
+        # 计算回撤
+        drawdown = (self._peak_value - current_value) / self._peak_value
+
+        # 检查是否触发止损
+        if drawdown >= self.max_drawdown_limit and not self._in_drawdown_stop:
+            logger.warning(f"{self._current_date} 触发整体止损! 回撤: {drawdown*100:.1f}%")
+            self._in_drawdown_stop = True
+            self._cooldown_counter = self.cooldown_days
+            return True
+
+        # 冷却期处理
+        if self._in_drawdown_stop:
+            self._cooldown_counter -= 1
+            if self._cooldown_counter <= 0:
+                logger.info(f"{self._current_date} 冷却期结束，恢复交易")
+                self._in_drawdown_stop = False
+                self._peak_value = current_value  # 重置高点
+
+        return self._in_drawdown_stop
+
+    def _get_effective_hold_num(self) -> int:
+        """获取有效持仓数量（考虑波动率择时）"""
+        if not self.vol_timing:
+            return self.hold_num
+
+        self._current_vol = self._calculate_market_volatility()
+
+        if self._current_vol > self.vol_threshold:
+            reduced_num = int(self.hold_num * self.vol_reduce_ratio)
+            return max(reduced_num, 1)
+
+        return self.hold_num
 
     def _get_price(self, code: str, price_type: str = "close") -> Optional[float]:
         """获取价格"""
@@ -179,19 +364,56 @@ class MultifactorBacktest:
         生成换仓信号
 
         策略: 卖出不在目标列表中的，买入新的目标股票
-        每日最多换仓rebalance_num只
+        每次最多换仓rebalance_num只
+
+        优化功能:
+        - 持仓粘性: 已持有的股票不轻易换出
+        - 最小持仓天数: 持仓不满N天不换
+        - 波动率择时: 当需要减仓时，优先卖出排名靠后的持仓
         """
         current_stocks = set(self._positions.keys())
         target_set = set(target_stocks)
+        effective_hold_num = len(target_stocks)
 
-        # 需要卖出的
-        to_sell = list(current_stocks - target_set)
+        # 需要卖出的（不在目标列表中的）
+        to_sell_candidates = []
+        for code in current_stocks:
+            if code not in target_set:
+                # 检查最小持仓天数
+                if self.min_holding_days > 0:
+                    pos = self._positions[code]
+                    # 简化的天数计算（实际应该用交易日）
+                    holding_days = len([d for d in self._equity_history
+                                       if d.get("date", "") >= pos.entry_date])
+                    if holding_days < self.min_holding_days:
+                        continue  # 持仓时间不够，不卖
+
+                # 检查持仓粘性：如果股票在target_stocks的后半部分，有一定概率保留
+                if self.position_sticky > 0 and code in target_stocks:
+                    rank = target_stocks.index(code)
+                    if rank < len(target_stocks) * (1 - self.position_sticky):
+                        continue  # 排名靠前，保留
+
+                to_sell_candidates.append(code)
+
+        to_sell = to_sell_candidates
+
+        # 波动率择时减仓：如果当前持仓数 > 目标持仓数
+        current_count = len(self._positions)
+        if current_count > effective_hold_num:
+            # 需要额外减仓的数量
+            extra_to_sell = current_count - effective_hold_num
+            # 从当前持仓中选择不在目标列表顶部的股票卖出
+            for stock in reversed(list(self._positions.keys())):
+                if stock not in to_sell and len(to_sell) < current_count - effective_hold_num + self.rebalance_num:
+                    to_sell.append(stock)
+
         # 需要买入的
         to_buy = [s for s in target_stocks if s not in current_stocks]
 
-        # 限制每日换仓数量
-        self._pending_sells = to_sell[:self.rebalance_num]
-        self._pending_buys = to_buy[:self.rebalance_num]
+        # 限制每次换仓数量
+        self._pending_sells = to_sell[:self.rebalance_num + max(0, current_count - effective_hold_num)]
+        self._pending_buys = to_buy[:self.rebalance_num] if current_count <= effective_hold_num else []
 
     def _execute_rebalance(self):
         """执行换仓 (使用开盘价)"""
@@ -282,7 +504,9 @@ class MultifactorBacktest:
             "cash": self._cash,
             "market_value": sum(p.market_value for p in self._positions.values()),
             "total_value": self._get_total_value(),
-            "positions_count": len(self._positions)
+            "positions_count": len(self._positions),
+            "volatility": self._current_vol,
+            "in_stop": self._in_drawdown_stop
         })
 
     def _calculate_result(self, start_date: str, end_date: str) -> BacktestResult:
